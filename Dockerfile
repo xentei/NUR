@@ -1,15 +1,14 @@
 FROM python:3.12-slim
 
-WORKDIR /app
-
-# Dependencias
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# App
-COPY . .
-
+ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# Railway inyecta PORT
-CMD ["sh", "-c", "gunicorn app:app --bind 0.0.0.0:${PORT:-8000}"]
+WORKDIR /app
+
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app.py /app/app.py
+
+# Railway sets PORT automatically
+CMD sh -c "gunicorn -w 2 -b 0.0.0.0:${PORT:-8080} app:app"
