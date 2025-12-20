@@ -3,10 +3,16 @@
 ## Local
 ```powershell
 python -m venv venv
-.env\Scripts\activate
-pip install -r requirements.txt
-$env:FLASK_DEBUG="1"
-python app.py
+$env:SECRET_KEY="definí-una-clave-segura"
+$env:ADMIN_USER="admin"
+$env:ADMIN_PASS="cambiame"
+$env:OP_USER="PSA"
+$env:OP_PASS="cambiame"
+Usuarios iniciales: si la DB está vacía se crearán al iniciar. Si faltan variables, se generan usuarios y contraseñas efímeras (solo para esa ejecución) y se muestran en la consola. Si no definís SECRET_KEY, la app genera una y la guarda en `instance/secret_key.txt` (o en el volumen `/data` en Railway) para que no falle el arranque y se mantenga entre reinicios locales.
+Variables recomendadas (definilas en producción; en local se generan claves/usuarios efímeros si faltan):
+- SECRET_KEY
+
+Variables opcionales:
 ```
 Abrí: http://127.0.0.1:5000
 
