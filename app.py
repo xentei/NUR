@@ -233,6 +233,18 @@ def sanitize_text(s: str, max_len: int = 120) -> str:
     return s[:max_len]
 
 
+def parse_nro_list(raw: str) -> list[str]:
+    """Permite cargar múltiples números de nota separados por ; o ,"""
+
+    cleaned: list[str] = []
+    normalized = raw.replace(",", ";")
+    for part in normalized.split(";"):
+        val = sanitize_text(part, max_len=50)
+        if val:
+            cleaned.append(val)
+    return cleaned
+
+
 TOP_PUESTOS = [
     "PAMPA",
     "ECO",
@@ -343,24 +355,29 @@ def resolve_puesto_choice(selected: str, otro: str = "") -> tuple[bool, str]:
     return ok, cleaned.upper() if ok else cleaned
 
 
-def puesto_select_component(select_name: str = "puesto_predef", other_name: str = "puesto_otro", selected: str = "", other_value: str = "") -> str:
+def puesto_select_component(
+    select_name: str = "puesto_predef",
+    other_name: str = "puesto_otro",
+    selected: str = "",
+    other_value: str = "",
+) -> str:
     options = "".join([
-        f'<option value="{p}" {"selected" if p == selected else ""}>{p}</option>'
+        f'<option value="{p}">{p}</option>'
         for p in PUESTOS_PREDEFINIDOS
     ])
     show_other = "" if selected == "OTRO" else "style=\"display:none;\""
+    preset_value = "" if selected == "OTRO" else selected
+    datalist_id = f"lista_{select_name}"
     return f"""
     <div class="form-group">
       <label>Puesto</label>
-      <div class="combobox">
-        <input type="text" class="combo-search" placeholder="Buscar puesto..." oninput="filterPuestoOptions(this, '{select_name}')" />
-        <select name="{select_name}" id="{select_name}" onchange="toggleOtro(this, '{other_name}')">
-          <option value="">-- Seleccionar puesto --</option>
-          {options}
-        </select>
-        <input type="text" name="{other_name}" id="{other_name}" placeholder="Escribí el puesto" value="{other_value}" {show_other} />
-        <p class="small-text">Elegí un puesto de la lista. Si seleccionás "OTRO", podés escribirlo.</p>
-      </div>
+      <input type="text" name="{select_name}" id="{select_name}" list="{datalist_id}" placeholder="Elegí un puesto" value="{preset_value}" oninput="handlePuestoInput(this, '{other_name}')" autocomplete="off" />
+      <datalist id="{datalist_id}">
+        <option value="">-- Seleccionar puesto --</option>
+        {options}
+      </datalist>
+      <input type="text" name="{other_name}" id="{other_name}" placeholder="Escribí el puesto" value="{other_value}" {show_other} />
+      <p class="small-text">Elegí un puesto de la lista o escribí "OTRO" para completarlo.</p>
     </div>
     """
 
@@ -611,14 +628,14 @@ def admin_home():
     Acá prefijás las notas (número, autoriza y puesto). El operador solo completa entrega/recepción.
   </p>
   <p style="margin-bottom:20px; font-size:14px;">
-    <strong>Importante:</strong> Creá una fila por cada puesto. Si el mismo N° va a 5 puestos, creás 5 notas (una por puesto).
+    <strong>Importante:</strong> Podés cargar varios N° separados por <code>;</code> si van al mismo puesto/autoriza.
   </p>
   <form method="POST" action="{url_for('admin_crear_nota')}">
     {csrf_field()}
     <div class="grid">
       <div class="form-group">
         <label>N° Nota</label>
-        <input type="text" name="nro_nota" required />
+        <input type="text" name="nro_nota" required placeholder="Ej: 9983; 9982; 9992" />
       </div>
       <div class="form-group">
         <label>Autoriza</label>
@@ -724,7 +741,7 @@ def admin_home():
 @role_required(ADMIN_ROLE)
 def admin_crear_nota():
     try:
-        nro_nota = sanitize_text(request.form.get("nro_nota", ""), max_len=50)
+        nro_list = parse_nro_list(request.form.get("nro_nota", ""))
         autoriza = sanitize_text(request.form.get("autoriza", ""), max_len=10)
         ok_puesto, puesto = resolve_puesto_choice(
             request.form.get("puesto_predef", ""),
@@ -734,25 +751,27 @@ def admin_crear_nota():
             flash(puesto, "danger")
             return redirect(url_for("admin_home"))
 
-        if not nro_nota or not autoriza or not puesto:
+        if not nro_list or not autoriza or not puesto:
             flash("Todos los campos son obligatorios.", "danger")
             return redirect(url_for("admin_home"))
-        
+
         if autoriza not in ["AVSEC", "OPER"]:
             flash("Autoriza debe ser AVSEC u OPER.", "danger")
             return redirect(url_for("admin_home"))
-        
-        nota = Nota(
-            nro_nota=nro_nota,
-            autoriza=autoriza,
-            puesto=puesto,
-            estado="PENDIENTE",
-            creado_por=current_user.username
-        )
-        db.session.add(nota)
+
+        for nro in nro_list:
+            nota = Nota(
+                nro_nota=nro,
+                autoriza=autoriza,
+                puesto=puesto,
+                estado="PENDIENTE",
+                creado_por=current_user.username
+            )
+            db.session.add(nota)
+
         db.session.commit()
-        
-        flash(f"Nota creada: {nro_nota} - {puesto}", "success")
+
+        flash(f"Notas creadas: {', '.join(nro_list)} - {puesto}", "success")
     except Exception as e:
         db.session.rollback()
         flash(f"Error al crear nota: {str(e)}", "danger")
@@ -1291,14 +1310,14 @@ def dop_home():
     Acá prefijás las notas (número, autoriza y puesto). El operador solo completa entrega/recepción.
   </p>
   <p style="margin-bottom:20px; font-size:14px;">
-    <strong>Importante:</strong> Creá una fila por cada puesto. Si el mismo N° va a 5 puestos, creás 5 notas (una por puesto).
+    <strong>Importante:</strong> Podés cargar varios N° separados por <code>;</code> si van al mismo puesto/autoriza.
   </p>
   <form method="POST" action="{url_for('dop_crear_nota')}">
     {csrf_field()}
     <div class="grid">
       <div class="form-group">
         <label>N° Nota</label>
-        <input type="text" name="nro_nota" required />
+        <input type="text" name="nro_nota" required placeholder="Ej: 9983; 9982; 9992" />
       </div>
       <div class="form-group">
         <label>Autoriza</label>
@@ -1394,7 +1413,7 @@ def dop_home():
 @role_required(DOP_ROLE)
 def dop_crear_nota():
     try:
-        nro_nota = sanitize_text(request.form.get("nro_nota", ""), max_len=50)
+        nro_list = parse_nro_list(request.form.get("nro_nota", ""))
         autoriza = sanitize_text(request.form.get("autoriza", ""), max_len=10)
         ok_puesto, puesto = resolve_puesto_choice(
             request.form.get("puesto_predef", ""),
@@ -1404,25 +1423,27 @@ def dop_crear_nota():
             flash(puesto, "danger")
             return redirect(url_for("dop_home"))
 
-        if not nro_nota or not autoriza or not puesto:
+        if not nro_list or not autoriza or not puesto:
             flash("Todos los campos son obligatorios.", "danger")
             return redirect(url_for("dop_home"))
-        
+
         if autoriza not in ["AVSEC", "OPER"]:
             flash("Autoriza debe ser AVSEC u OPER.", "danger")
             return redirect(url_for("dop_home"))
-        
-        nota = Nota(
-            nro_nota=nro_nota,
-            autoriza=autoriza,
-            puesto=puesto,
-            estado="PENDIENTE",
-            creado_por=current_user.username
-        )
-        db.session.add(nota)
+
+        for nro in nro_list:
+            nota = Nota(
+                nro_nota=nro,
+                autoriza=autoriza,
+                puesto=puesto,
+                estado="PENDIENTE",
+                creado_por=current_user.username
+            )
+            db.session.add(nota)
+
         db.session.commit()
-        
-        flash(f"Nota creada: {nro_nota} - {puesto}", "success")
+
+        flash(f"Notas creadas: {', '.join(nro_list)} - {puesto}", "success")
     except Exception as e:
         db.session.rollback()
         flash(f"Error al crear nota: {str(e)}", "danger")

@@ -377,7 +377,8 @@
 function toggleOtro(selectEl, otherId) {
   const otherInput = document.getElementById(otherId);
   if (!otherInput) return;
-  if (selectEl.value === 'OTRO') {
+  const value = (selectEl.value || '').trim().toUpperCase();
+  if (value === 'OTRO') {
     otherInput.style.display = '';
     otherInput.focus();
   } else {
@@ -386,18 +387,8 @@ function toggleOtro(selectEl, otherId) {
   }
 }
 
-function filterPuestoOptions(inputEl, selectId) {
-  const selectEl = document.getElementById(selectId);
-  if (!selectEl) return;
-  const term = inputEl.value.trim().toUpperCase();
-  Array.from(selectEl.options).forEach((opt, idx) => {
-    if (idx === 0) return; // placeholder stays
-    const text = opt.textContent.toUpperCase();
-    opt.hidden = term && !text.includes(term);
-  });
-  if (term) {
-    selectEl.value = '';
-  }
+function handlePuestoInput(inputEl, otherId) {
+  toggleOtro(inputEl, otherId);
 }
 </script>
 </body>
