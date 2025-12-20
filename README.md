@@ -14,7 +14,7 @@ Usuarios iniciales: si la DB está vacía se crearán al iniciar. Si faltan vari
 ## Roles disponibles
 - **admin**: control total (notas, usuarios, reportes de error).
 - **dop**: alta y consulta de notas; no borra usuarios.
-- **operador**: completa notas y reporta errores.
+- **operador**: completa notas y reporta errores. Podés tildar “Guardar datos de entrega y recepción” dentro de cada nota para reusar esos datos durante toda la sesión.
 - **visor**: solo lectura de notas (filtros incluidos, sin acciones).
 Variables recomendadas (definilas en producción; en local se generan claves/usuarios efímeras si faltan):
 - SECRET_KEY

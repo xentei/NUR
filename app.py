@@ -1540,46 +1540,16 @@ def operador_puesto(puesto: str):
         return redirect(url_for("operador_home"))
 
     notas = Nota.query.filter_by(puesto=puesto, estado="PENDIENTE").order_by(Nota.id).all()
-    
-    session_key = f"defaults_{puesto}"
-    defaults = session.get(session_key, {})
-    
+
     content = f"""
 <div class="panel">
   <h2>📋 Puesto: {puesto}</h2>
   <p style="margin-bottom:20px;">
-    Seleccioná una nota pendiente y completala. Si vas a completar varias seguidas, guardá la selección y después es "Completar y siguiente".
+    Seleccioná una nota pendiente y completala. Dentro de la nota vas a poder marcar si querés conservar los datos de entrega/recepción durante esta sesión.
   </p>
   <p style="margin-bottom:20px; font-size:13px; color:#dc2626;">
     <strong>⚠️ Importante:</strong> Si el legajo tiene puntos o comas (ej: 501.123 o 501,123), va a dar error: usá solo números.
   </p>
-</div>
-
-<div class="panel">
-  <h2>💾 Datos de Sesión (se borran al salir)</h2>
-  <form method="POST" action="{url_for('operador_guardar_defaults')}">
-    {csrf_field()}
-    <input type="hidden" name="puesto" value="{puesto}" />
-    <div class="grid">
-      <div class="form-group">
-        <label>Entrega - Nombre</label>
-        <input type="text" name="entrega_nombre" value="{defaults.get('entrega_nombre', '')}" />
-      </div>
-      <div class="form-group">
-        <label>Entrega - Legajo</label>
-        <input type="text" name="entrega_legajo" value="{defaults.get('entrega_legajo', '')}" placeholder="Ej: 501123" />
-      </div>
-      <div class="form-group">
-        <label>Recibe - Nombre</label>
-        <input type="text" name="recibe_nombre" value="{defaults.get('recibe_nombre', '')}" />
-      </div>
-      <div class="form-group">
-        <label>Recibe - Legajo</label>
-        <input type="text" name="recibe_legajo" value="{defaults.get('recibe_legajo', '')}" placeholder="Ej: 502456" />
-      </div>
-    </div>
-    <button type="submit" class="btn btn-success">💾 Guardar Selección</button>
-  </form>
 </div>
 """
     
@@ -1626,31 +1596,6 @@ def operador_puesto(puesto: str):
     return render_page(f"Puesto {puesto} - Operador", content, show_op_nav=True)
 
 
-@app.route("/operador/guardar_defaults", methods=["POST"])
-@login_required
-@role_required(OP_ROLE)
-def operador_guardar_defaults():
-    try:
-        ok_puesto, puesto = validate_puesto(request.form.get("puesto", ""))
-        if not ok_puesto:
-            flash(puesto, "danger")
-            return redirect(url_for("operador_home"))
-        
-        session_key = f"defaults_{puesto}"
-        session[session_key] = {
-            "entrega_nombre": sanitize_text(request.form.get("entrega_nombre", "")),
-            "entrega_legajo": normalize_legajo(request.form.get("entrega_legajo", "")),
-            "recibe_nombre": sanitize_text(request.form.get("recibe_nombre", "")),
-            "recibe_legajo": normalize_legajo(request.form.get("recibe_legajo", ""))
-        }
-        
-        flash("✅ Selección guardada (solo en esta sesión).", "success")
-    except Exception as e:
-        flash(f"Error al guardar: {str(e)}", "danger")
-    
-    return redirect(url_for("operador_puesto", puesto=puesto))
-
-
 @app.route("/operador/completar/<int:nota_id>", methods=["GET", "POST"])
 @login_required
 @role_required(OP_ROLE)
@@ -1666,13 +1611,15 @@ def operador_completar_nota(nota_id: int):
     
     session_key = f"defaults_{nota.puesto}"
     pre = session.get(session_key, {})
-    
+    remember_prefill = "checked" if pre else ""
+
     if request.method == "POST":
         try:
             entrega_nombre = sanitize_text(request.form.get("entrega_nombre", ""))
             entrega_legajo = normalize_legajo(request.form.get("entrega_legajo", ""))
             recibe_nombre = sanitize_text(request.form.get("recibe_nombre", ""))
             recibe_legajo = normalize_legajo(request.form.get("recibe_legajo", ""))
+            remember_defaults = request.form.get("remember_defaults") == "on"
             fecha_str = request.form.get("fecha_hora_recepcion", "")
             observaciones = sanitize_text(request.form.get("observaciones", ""), max_len=500)
             
@@ -1705,7 +1652,18 @@ def operador_completar_nota(nota_id: int):
             nota.estado = "COMPLETADA"
             nota.completado_por = current_user.username
             nota.completado_en = datetime.utcnow()
-            
+
+            if remember_defaults:
+                session[session_key] = {
+                    "entrega_nombre": entrega_nombre,
+                    "entrega_legajo": entrega_legajo,
+                    "recibe_nombre": recibe_nombre,
+                    "recibe_legajo": recibe_legajo,
+                }
+            else:
+                session.pop(session_key, None)
+            session.modified = True
+
             db.session.commit()
             flash(f"✅ Nota #{nota_id} completada.", "success")
             
@@ -1723,9 +1681,9 @@ def operador_completar_nota(nota_id: int):
 </div>
 
 <div class="panel">
-  <form method="POST">
+  <form method="POST" class="stacked-form">
     {csrf_field()}
-    <div class="grid">
+    <div class="form-row">
       <div class="form-group">
         <label>Entrega - Nombre</label>
         <input type="text" name="entrega_nombre" value="{pre.get('entrega_nombre', '')}" required />
@@ -1734,6 +1692,8 @@ def operador_completar_nota(nota_id: int):
         <label>Entrega - Legajo</label>
         <input type="text" name="entrega_legajo" value="{pre.get('entrega_legajo', '')}" required placeholder="Ej: 501123" />
       </div>
+    </div>
+    <div class="form-row">
       <div class="form-group">
         <label>Recibe - Nombre</label>
         <input type="text" name="recibe_nombre" value="{pre.get('recibe_nombre', '')}" required />
@@ -1742,6 +1702,8 @@ def operador_completar_nota(nota_id: int):
         <label>Recibe - Legajo</label>
         <input type="text" name="recibe_legajo" value="{pre.get('recibe_legajo', '')}" required placeholder="Ej: 502456" />
       </div>
+    </div>
+    <div class="form-row">
       <div class="form-group">
         <label>Fecha y Hora de Recepción</label>
         <input type="datetime-local" name="fecha_hora_recepcion" required />
@@ -1751,8 +1713,14 @@ def operador_completar_nota(nota_id: int):
         <textarea name="observaciones" rows="3"></textarea>
       </div>
     </div>
-    <button type="submit" class="btn btn-success">✅ Completar Nota</button>
-    <a href="{url_for('operador_puesto', puesto=nota.puesto)}" class="btn btn-secondary">← Cancelar</a>
+    <label class="remember-toggle">
+      <input type="checkbox" name="remember_defaults" {remember_prefill} />
+      Guardar datos de entrega y recepción para esta sesión
+    </label>
+    <div class="action-row">
+      <button type="submit" class="btn btn-success">✅ Completar Nota</button>
+      <a href="{url_for('operador_puesto', puesto=nota.puesto)}" class="btn btn-secondary">← Cancelar</a>
+    </div>
   </form>
 </div>
 """
