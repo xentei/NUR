@@ -9,7 +9,7 @@ $env:ADMIN_USER="admin"
 $env:ADMIN_PASS="cambiame"
 $env:OP_USER="PSA"
 $env:OP_PASS="cambiame"
-Usuarios iniciales: si la DB está vacía se crearán al iniciar. Si faltan variables, se generan usuarios y contraseñas efímeras (solo para esa ejecución) y se muestran en la consola. Si no definís SECRET_KEY, la app genera una y la guarda en `instance/secret_key.txt` (o en el volumen `/data` en Railway) para que no falle el arranque y se mantenga entre reinicios locales. Si no seteás credenciales, el admin por defecto será `admin` con contraseña `AdminSecure2025!`.
+Usuarios iniciales: si la DB está vacía se crearán al iniciar. Si faltan variables, se generan usuarios y contraseñas efímeras (solo para esa ejecución) y se muestran en la consola. Si no definís SECRET_KEY, la app genera una y la guarda en `instance/secret_key.txt` (o en el volumen `/data` en Railway) para que no falle el arranque y se mantenga entre reinicios locales. Si no seteás credenciales, el admin por defecto será `admin` con contraseña aleatoria (impresa en consola al arrancar).
 
 ## Roles disponibles
 - **admin**: control total (notas, usuarios, reportes de error).

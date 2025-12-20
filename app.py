@@ -317,7 +317,7 @@ def bootstrap_users() -> None:
         import secrets
 
         admin_user = admin_user or "admin"
-        admin_pass = admin_pass or "AdminSecure2025!"
+        admin_pass = admin_pass or secrets.token_urlsafe(14)
         op_user = op_user or "PSA"
         op_pass = op_pass or secrets.token_urlsafe(12)
         print(
@@ -450,7 +450,7 @@ def login():
     return render_template('login.html')
 
 
-@app.route("/logout")
+@app.route("/logout", methods=["GET", "POST"])
 @login_required
 def logout():
     session.clear()
@@ -535,9 +535,11 @@ def admin_home():
         <input type="text" name="puesto" value="{flt_puesto}" />
       </div>
     </div>
-    <button type="submit" class="btn btn-primary">🔍 Filtrar</button>
-    <a href="{url_for('admin_exportar_csv', nro_nota=flt_nro, autoriza=flt_aut, puesto=flt_puesto)}" class="btn btn-success">📥 Exportar CSV</a>
-    <a href="{url_for('admin_home')}" class="btn btn-secondary">🔄 Limpiar filtros</a>
+    <div class="action-row">
+      <button type="submit" class="btn btn-primary">🔍 Filtrar</button>
+      <a href="{url_for('admin_exportar_csv', nro_nota=flt_nro, autoriza=flt_aut, puesto=flt_puesto)}" class="btn btn-success">📥 Exportar CSV</a>
+      <a href="{url_for('admin_home')}" class="btn btn-secondary">🔄 Limpiar filtros</a>
+    </div>
   </form>
   
   <table>
