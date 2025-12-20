@@ -36,63 +36,40 @@ def _bool_env(name: str, default: bool = False) -> bool:
 
 
 def _load_secret_key() -> str:
-    try:
-        env_key = os.getenv("SECRET_KEY")
-        if env_key:
-            return env_key
+    env_key = os.getenv("SECRET_KEY")
+    if env_key:
+        return env_key
 
-        import secrets
+    import secrets
 
-        candidate_paths = []
-        if RAILWAY_VOLUME_PATH:
-            candidate_paths.append(os.path.join(RAILWAY_VOLUME_PATH, "secret_key.txt"))
-        candidate_paths.append(os.path.join(INSTANCE_DIR, "secret_key.txt"))
+    if os.path.exists(RAILWAY_VOLUME_PATH):
+        secret_path = os.path.join(RAILWAY_VOLUME_PATH, "secret_key.txt")
+    else:
+        secret_path = os.path.join(INSTANCE_DIR, "secret_key.txt")
+        os.makedirs(INSTANCE_DIR, exist_ok=True)
 
-        # Intentar leer un key ya persistido
-        for path in candidate_paths:
-            try:
-                if os.path.exists(path):
-                    with open(path, "r", encoding="utf-8") as fh:
-                        key = fh.read().strip()
-                        if key:
-                            print("🔑 SECRET_KEY cargado desde archivo persistente.")
-                            return key
-            except OSError:
-                print(f"⚠️ No se pudo leer SECRET_KEY en {path}; se intentará con otro destino.")
-
-        # Generar y persistir en el primer destino utilizable
-        key = secrets.token_hex(32)
-        for path in candidate_paths:
-            try:
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                with open(path, "w", encoding="utf-8") as fh:
-                    fh.write(key)
-                print(
-                    "⚠️ SECRET_KEY no está configurado; se generó uno y se guardó en "
-                    f"{path}. Usá la variable de entorno SECRET_KEY en producción."
-                )
+    if os.path.exists(secret_path):
+        with open(secret_path, "r", encoding="utf-8") as fh:
+            key = fh.read().strip()
+            if key:
+                print("🔑 SECRET_KEY cargado desde archivo persistente.")
                 return key
-            except OSError:
-                print(
-                    "⚠️ SECRET_KEY no está configurado y no se pudo persistir en "
-                    f"{path}. Se intentará otro destino."
-                )
 
+    key = secrets.token_hex(32)
+    try:
+        os.makedirs(os.path.dirname(secret_path), exist_ok=True)
+        with open(secret_path, "w", encoding="utf-8") as fh:
+            fh.write(key)
+        print(
+            "⚠️ SECRET_KEY no está configurado; se generó uno y se guardó en "
+            f"{secret_path}. Usá la variable de entorno SECRET_KEY en producción."
+        )
+    except OSError:
         print(
             "⚠️ SECRET_KEY no está configurado; se generó uno efímero solo para esta instancia. "
             "Usá la variable de entorno SECRET_KEY en producción."
         )
-        return key
-
-    except Exception as exc:  # pragma: no cover - salvaguarda defensiva
-        import secrets
-
-        fallback = secrets.token_hex(32)
-        print(
-            "⚠️ Error inesperado al cargar SECRET_KEY; se usará uno efímero solo para esta instancia.",
-            f"Detalle: {exc}",
-        )
-        return fallback
+    return key
 
 
 APP_NAME = "NUR - Notas de Autorización"
@@ -100,7 +77,9 @@ ADMIN_ROLE = "admin"
 DOP_ROLE = "dop"
 OP_ROLE = "operador"
 
-SECRET_KEY = _load_secret_key()
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY:
+    raise RuntimeError("SECRET_KEY es obligatorio. Definilo en variables de entorno.")
 
 WHATSAPP_NUMBER = os.getenv("WHATSAPP_NUMBER", "")
 PUBLIC_WHATSAPP_TEXT = os.getenv(
@@ -300,19 +279,18 @@ def bootstrap_users() -> None:
     op_user = os.getenv("OP_USER")
     op_pass = os.getenv("OP_PASS")
 
-    if not all([admin_user, admin_pass, op_user, op_pass]):
-        import secrets
+    missing = [name for name, val in [
+        ("ADMIN_USER", admin_user),
+        ("ADMIN_PASS", admin_pass),
+        ("OP_USER", op_user),
+        ("OP_PASS", op_pass),
+    ] if not val]
 
-        admin_user = admin_user or "admin"
-        admin_pass = admin_pass or secrets.token_urlsafe(12)
-        op_user = op_user or "PSA"
-        op_pass = op_pass or secrets.token_urlsafe(12)
-        print(
-            "⚠️ Credenciales iniciales generadas automáticamente (solo para esta instancia). "
-            "Definí ADMIN_USER/ADMIN_PASS/OP_USER/OP_PASS en producción."
+    if missing:
+        raise RuntimeError(
+            "Faltan variables de entorno para crear usuarios iniciales: "
+            + ", ".join(missing)
         )
-        print(f"   ADMIN_USER={admin_user} | ADMIN_PASS={admin_pass}")
-        print(f"   OP_USER={op_user} | OP_PASS={op_pass}")
 
     u1 = User(username=admin_user, role=ADMIN_ROLE)
     u1.set_password(admin_pass)
