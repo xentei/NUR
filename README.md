@@ -9,7 +9,7 @@ $env:ADMIN_PASS="cambiame"
 $env:OP_USER="PSA"
 $env:OP_PASS="cambiame"
 Usuarios iniciales: si la DB está vacía se crearán al iniciar, pero **solo si** definiste las variables anteriores.
-Variables recomendadas (definilas en producción; en local se generan claves/usuarios efímeros si faltan):
+Variables requeridas (fallará el arranque si faltan):
 - SECRET_KEY
 
 Variables opcionales:

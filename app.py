@@ -37,13 +37,7 @@ OP_ROLE = "operador"
 
 SECRET_KEY = os.getenv("SECRET_KEY")
 if not SECRET_KEY:
-    import secrets
-
-    SECRET_KEY = secrets.token_hex(32)
-    print(
-        "⚠️ SECRET_KEY no está configurado; se generó uno efímero solo para esta instancia. "
-        "Definí SECRET_KEY en variables de entorno para producción."
-    )
+    raise RuntimeError("SECRET_KEY es obligatorio. Definilo en variables de entorno.")
 
 WHATSAPP_NUMBER = os.getenv("WHATSAPP_NUMBER", "")
 PUBLIC_WHATSAPP_TEXT = os.getenv(
