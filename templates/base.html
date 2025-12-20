@@ -390,6 +390,13 @@ function toggleOtro(selectEl, otherId) {
 function handlePuestoInput(inputEl, otherId) {
   toggleOtro(inputEl, otherId);
 }
+
+function openPuestoPicker(inputEl) {
+  if (!inputEl) return;
+  if (typeof inputEl.showPicker === 'function') {
+    try { inputEl.showPicker(); } catch (e) {}
+  }
+}
 </script>
 </body>
 </html>

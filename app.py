@@ -371,7 +371,7 @@ def puesto_select_component(
     return f"""
     <div class="form-group">
       <label>Puesto</label>
-      <input type="text" name="{select_name}" id="{select_name}" list="{datalist_id}" placeholder="Elegí un puesto" value="{preset_value}" oninput="handlePuestoInput(this, '{other_name}')" autocomplete="off" />
+      <input type="text" name="{select_name}" id="{select_name}" list="{datalist_id}" placeholder="Elegí un puesto" value="{preset_value}" oninput="handlePuestoInput(this, '{other_name}')" onfocus="openPuestoPicker(this)" onclick="openPuestoPicker(this)" autocomplete="off" />
       <datalist id="{datalist_id}">
         <option value="">-- Seleccionar puesto --</option>
         {options}
