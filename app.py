@@ -31,6 +31,7 @@ def _bool_env(name: str, default: bool = False) -> bool:
 
 APP_NAME = "NUR - Notas de Autorización"
 ADMIN_ROLE = "admin"
+DOP_ROLE = "dop"  # Director de Operaciones - nuevo rol
 OP_ROLE = "operador"
 
 SECRET_KEY = os.getenv("SECRET_KEY")
@@ -213,10 +214,9 @@ with app.app_context():
 
 
 # =========================
-# TEMPLATES - Todos independientes
+# TEMPLATES
 # =========================
 
-# Template de Login
 LOGIN_HTML = r"""
 <!DOCTYPE html>
 <html lang="es">
@@ -329,14 +329,19 @@ LOGIN_HTML = r"""
 </html>
 """
 
-# Template base para páginas internas
-def render_page(title, content_html, show_admin_nav=False, show_op_nav=False):
+
+def render_page(title, content_html, show_admin_nav=False, show_dop_nav=False, show_op_nav=False):
     nav_buttons = ""
     if show_admin_nav:
         nav_buttons = f'''
         <a href="{url_for('admin_home')}" class="btn btn-primary">Panel Admin</a>
         <a href="{url_for('admin_usuarios')}" class="btn btn-secondary">Usuarios</a>
         <a href="{url_for('admin_errores')}" class="btn btn-warning">Errores</a>
+        '''
+    elif show_dop_nav:
+        nav_buttons = f'''
+        <a href="{url_for('dop_home')}" class="btn btn-primary">Panel DOP</a>
+        <a href="{url_for('dop_errores')}" class="btn btn-warning">Errores</a>
         '''
     elif show_op_nav:
         nav_buttons = f'''
@@ -541,7 +546,7 @@ def render_page(title, content_html, show_admin_nav=False, show_op_nav=False):
   <div class="header">
     <h1>NUR - Notas de Autorización</h1>
     <div class="header-actions">
-      <span style="margin-right:15px;">👤 {current_user.username} ({current_user.role})</span>
+      <span style="margin-right:15px;">👤 {current_user.username} ({current_user.role.upper()})</span>
       {nav_buttons}
       <a href="{url_for('logout')}" class="btn btn-danger">Salir</a>
     </div>
@@ -570,6 +575,8 @@ def index():
     if current_user.is_authenticated:
         if current_user.role == ADMIN_ROLE:
             return redirect(url_for("admin_home"))
+        elif current_user.role == DOP_ROLE:
+            return redirect(url_for("dop_home"))
         else:
             return redirect(url_for("operador_home"))
     return redirect(url_for("login"))
@@ -580,6 +587,8 @@ def login():
     if current_user.is_authenticated:
         if current_user.role == ADMIN_ROLE:
             return redirect(url_for("admin_home"))
+        elif current_user.role == DOP_ROLE:
+            return redirect(url_for("dop_home"))
         else:
             return redirect(url_for("operador_home"))
     
@@ -599,6 +608,8 @@ def login():
             
             if user.role == ADMIN_ROLE:
                 return redirect(url_for("admin_home"))
+            elif user.role == DOP_ROLE:
+                return redirect(url_for("dop_home"))
             else:
                 return redirect(url_for("operador_home"))
         else:
@@ -617,7 +628,7 @@ def logout():
 
 
 # =========================
-# Admin Routes
+# Admin Routes (sin cambios, solo agrega DOP al crear usuarios)
 # =========================
 
 @app.route("/admin")
@@ -875,7 +886,7 @@ def admin_usuarios():
 <div class="panel">
   <h2>👥 Gestión de Usuarios</h2>
   <p style="margin-bottom:20px;">
-    Creá un usuario "operador" para completar notas. El operador no ve ni exporta CSV.
+    Creá usuarios con diferentes roles: <strong>Admin</strong> (control total), <strong>DOP</strong> (carga notas y ve todo, sin borrar), <strong>Operador</strong> (completa notas).
   </p>
   
   <form method="POST" action="{url_for('admin_crear_usuario')}" style="margin-bottom:30px;">
@@ -891,8 +902,9 @@ def admin_usuarios():
       <div class="form-group">
         <label>Rol</label>
         <select name="role" required>
-          <option value="operador">Operador</option>
-          <option value="admin">Admin</option>
+          <option value="operador">Operador (completa notas)</option>
+          <option value="dop">DOP (carga notas, solo lectura)</option>
+          <option value="admin">Admin (control total)</option>
         </select>
       </div>
     </div>
@@ -914,7 +926,7 @@ def admin_usuarios():
         content += f"""
       <tr>
         <td>{u.username}</td>
-        <td><span class="badge badge-completed">{u.role}</span></td>
+        <td><span class="badge badge-completed">{u.role.upper()}</span></td>
         <td>
           <form method="POST" action="{url_for('admin_borrar_usuario', user_id=u.id)}" style="display:inline;"
                 onsubmit="return confirm('¿Borrar usuario {u.username}?');">
@@ -946,7 +958,7 @@ def admin_crear_usuario():
             flash("Todos los campos son obligatorios.", "danger")
             return redirect(url_for("admin_usuarios"))
         
-        if role not in [ADMIN_ROLE, OP_ROLE]:
+        if role not in [ADMIN_ROLE, DOP_ROLE, OP_ROLE]:
             flash("Rol inválido.", "danger")
             return redirect(url_for("admin_usuarios"))
         
@@ -959,7 +971,7 @@ def admin_crear_usuario():
         db.session.add(user)
         db.session.commit()
         
-        flash(f"Usuario '{username}' creado.", "success")
+        flash(f"Usuario '{username}' creado con rol {role.upper()}.", "success")
     except Exception as e:
         db.session.rollback()
         flash(f"Error al crear usuario: {str(e)}", "danger")
@@ -1088,7 +1100,284 @@ def admin_borrar_error(err_id: int):
 
 
 # =========================
-# Operador Routes
+# DOP Routes (Director de Operaciones)
+# =========================
+
+@app.route("/dop")
+@login_required
+@role_required(DOP_ROLE)
+def dop_home():
+    """Panel DOP - puede crear notas y ver todo, pero NO borrar"""
+    flt_nro = request.args.get("nro_nota", "").strip()
+    flt_aut = request.args.get("autoriza", "").strip()
+    flt_puesto = request.args.get("puesto", "").strip()
+    
+    q = Nota.query
+    if flt_nro:
+        q = q.filter(Nota.nro_nota.contains(flt_nro))
+    if flt_aut:
+        q = q.filter(Nota.autoriza == flt_aut)
+    if flt_puesto:
+        q = q.filter(Nota.puesto.contains(flt_puesto))
+    
+    notas = q.order_by(Nota.id.desc()).limit(250).all()
+    
+    content = f"""
+<div class="panel panel-highlight">
+  <h2>📝 REGISTRAR NOTA</h2>
+  <p style="margin-bottom:20px; font-size:15px;">
+    Acá prefijás las notas (número, autoriza y puesto). El operador solo completa entrega/recepción.
+  </p>
+  <p style="margin-bottom:20px; font-size:14px;">
+    <strong>Importante:</strong> Creá una fila por cada puesto. Si el mismo N° va a 5 puestos, creás 5 notas (una por puesto).
+  </p>
+  <form method="POST" action="{url_for('dop_crear_nota')}">
+    <div class="grid">
+      <div class="form-group">
+        <label>N° Nota</label>
+        <input type="text" name="nro_nota" required />
+      </div>
+      <div class="form-group">
+        <label>Autoriza</label>
+        <select name="autoriza" required>
+          <option value="">-- Seleccionar --</option>
+          <option value="AVSEC">AVSEC</option>
+          <option value="OPER">OPER</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Puesto</label>
+        <input type="text" name="puesto" required placeholder="Ej: GATE A3, PAMPA, etc." />
+      </div>
+    </div>
+    <button type="submit" class="btn btn-success" style="width:100%; font-size:16px;">✅ Crear Nota</button>
+  </form>
+</div>
+
+<div class="panel">
+  <h2>📋 Notas Registradas (Solo Lectura)</h2>
+  <form method="GET" style="margin-bottom:20px;">
+    <div class="grid">
+      <div class="form-group">
+        <label>Filtrar por N° Nota</label>
+        <input type="text" name="nro_nota" value="{flt_nro}" />
+      </div>
+      <div class="form-group">
+        <label>Filtrar por Autoriza</label>
+        <select name="autoriza">
+          <option value="">Todos</option>
+          <option value="AVSEC" {'selected' if flt_aut=='AVSEC' else ''}>AVSEC</option>
+          <option value="OPER" {'selected' if flt_aut=='OPER' else ''}>OPER</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Filtrar por Puesto</label>
+        <input type="text" name="puesto" value="{flt_puesto}" />
+      </div>
+    </div>
+    <button type="submit" class="btn btn-primary">🔍 Filtrar</button>
+    <a href="{url_for('dop_exportar_csv', nro_nota=flt_nro, autoriza=flt_aut, puesto=flt_puesto)}" class="btn btn-success">📥 Exportar CSV</a>
+    <a href="{url_for('dop_home')}" class="btn btn-secondary">🔄 Limpiar filtros</a>
+  </form>
+  
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>N° Nota</th>
+        <th>Autoriza</th>
+        <th>Puesto</th>
+        <th>Estado</th>
+        <th>Entrega</th>
+        <th>Recibe</th>
+        <th>Recepción</th>
+      </tr>
+    </thead>
+    <tbody>
+"""
+    
+    for n in notas:
+        estado_badge = '<span class="badge badge-pending">PENDIENTE</span>' if n.estado == 'PENDIENTE' else '<span class="badge badge-completed">COMPLETADA</span>'
+        entrega = f"{n.entrega_nombre or ''} {('('+n.entrega_legajo+')') if n.entrega_legajo else ''}"
+        recibe = f"{n.recibe_nombre or ''} {('('+n.recibe_legajo+')') if n.recibe_legajo else ''}"
+        recepcion = n.fecha_hora_recepcion.strftime('%d/%m %H:%M') if n.fecha_hora_recepcion else ''
+        
+        content += f"""
+      <tr>
+        <td>{n.id}</td>
+        <td><strong>{n.nro_nota}</strong></td>
+        <td>{n.autoriza}</td>
+        <td>{n.puesto}</td>
+        <td>{estado_badge}</td>
+        <td>{entrega}</td>
+        <td>{recibe}</td>
+        <td>{recepcion}</td>
+      </tr>
+"""
+    
+    content += """
+    </tbody>
+  </table>
+  <p class="small-text" style="margin-top:15px;">Mostrando hasta 250 registros. (Solo lectura - no podés borrar)</p>
+</div>
+"""
+    
+    return render_template_string(render_page("DOP - NUR", content, show_dop_nav=True))
+
+
+@app.route("/dop/crear_nota", methods=["POST"])
+@login_required
+@role_required(DOP_ROLE)
+def dop_crear_nota():
+    try:
+        nro_nota = sanitize_text(request.form.get("nro_nota", ""))
+        autoriza = sanitize_text(request.form.get("autoriza", ""))
+        puesto = sanitize_text(request.form.get("puesto", ""))
+        
+        if not nro_nota or not autoriza or not puesto:
+            flash("Todos los campos son obligatorios.", "danger")
+            return redirect(url_for("dop_home"))
+        
+        if autoriza not in ["AVSEC", "OPER"]:
+            flash("Autoriza debe ser AVSEC u OPER.", "danger")
+            return redirect(url_for("dop_home"))
+        
+        nota = Nota(
+            nro_nota=nro_nota,
+            autoriza=autoriza,
+            puesto=puesto,
+            estado="PENDIENTE",
+            creado_por=current_user.username
+        )
+        db.session.add(nota)
+        db.session.commit()
+        
+        flash(f"Nota creada: {nro_nota} - {puesto}", "success")
+    except Exception as e:
+        db.session.rollback()
+        flash(f"Error al crear nota: {str(e)}", "danger")
+    
+    return redirect(url_for("dop_home"))
+
+
+@app.route("/dop/exportar_csv")
+@login_required
+@role_required(DOP_ROLE)
+def dop_exportar_csv():
+    try:
+        q = Nota.query
+        
+        flt_nro = request.args.get("nro_nota", "").strip()
+        if flt_nro:
+            q = q.filter(Nota.nro_nota.contains(flt_nro))
+        
+        flt_aut = request.args.get("autoriza", "").strip()
+        if flt_aut:
+            q = q.filter(Nota.autoriza == flt_aut)
+        
+        flt_puesto = request.args.get("puesto", "").strip()
+        if flt_puesto:
+            q = q.filter(Nota.puesto.contains(flt_puesto))
+        
+        notas = q.limit(10000).all()
+        
+        si = StringIO()
+        cw = csv.writer(si)
+        cw.writerow([
+            "ID", "NroNota", "Autoriza", "Puesto", "Estado",
+            "EntregaNombre", "EntregaLegajo",
+            "RecibeNombre", "RecibeLegajo",
+            "FechaHoraRecepcion", "Observaciones",
+            "CreadoPor", "CreadoEn", "CompletadoPor", "CompletadoEn"
+        ])
+        
+        for n in notas:
+            cw.writerow([
+                n.id,
+                n.nro_nota,
+                n.autoriza,
+                n.puesto,
+                n.estado,
+                n.entrega_nombre or "",
+                n.entrega_legajo or "",
+                n.recibe_nombre or "",
+                n.recibe_legajo or "",
+                n.fecha_hora_recepcion.isoformat() if n.fecha_hora_recepcion else "",
+                n.observaciones or "",
+                n.creado_por or "",
+                n.creado_en.isoformat() if n.creado_en else "",
+                n.completado_por or "",
+                n.completado_en.isoformat() if n.completado_en else ""
+            ])
+        
+        output = si.getvalue()
+        si.close()
+        
+        return Response(
+            output,
+            mimetype="text/csv",
+            headers={"Content-Disposition": "attachment;filename=notas.csv"}
+        )
+    except Exception as e:
+        flash(f"Error al exportar: {str(e)}", "danger")
+        return redirect(url_for("dop_home"))
+
+
+@app.route("/dop/errores")
+@login_required
+@role_required(DOP_ROLE)
+def dop_errores():
+    """Panel de errores para DOP - solo lectura"""
+    errores = ErrorReporte.query.order_by(ErrorReporte.creado_en.desc()).limit(200).all()
+    
+    content = f"""
+<div class="panel">
+  <h2>🚨 Reportes de Errores (Solo Lectura)</h2>
+  <p style="margin-bottom:20px; font-size:14px; color:#6b7280;">
+    Podés ver los reportes pero no cerrarlos ni borrarlos. Solo el Admin puede gestionarlos.
+  </p>
+  
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>N° Nota</th>
+        <th>Puesto</th>
+        <th>Reportado por</th>
+        <th>Detalle</th>
+        <th>Fecha</th>
+        <th>Estado</th>
+      </tr>
+    </thead>
+    <tbody>
+"""
+    
+    for e in errores:
+        estado_badge = '<span class="badge badge-open">ABIERTO</span>' if e.estado == 'ABIERTO' else '<span class="badge badge-closed">CERRADO</span>'
+        
+        content += f"""
+      <tr>
+        <td>{e.id}</td>
+        <td>{e.nro_nota or ''}</td>
+        <td>{e.puesto or ''}</td>
+        <td>{e.reportado_por}</td>
+        <td>{e.detalle[:100]}...</td>
+        <td>{e.creado_en.strftime('%d/%m %H:%M')}</td>
+        <td>{estado_badge}</td>
+      </tr>
+"""
+    
+    content += """
+    </tbody>
+  </table>
+  <p class="small-text" style="margin-top:15px;">Mostrando hasta 200 registros.</p>
+</div>
+"""
+    
+    return render_template_string(render_page("Errores - DOP", content, show_dop_nav=True))
+
+# =========================
+# Operador Routes (con formulario de errores mejorado)
 # =========================
 
 @app.route("/operador")
@@ -1359,6 +1648,19 @@ def operador_completar_nota(nota_id: int):
 @login_required
 @role_required(OP_ROLE)
 def operador_reportar_inicio():
+    """Formulario mejorado para reportar errores con selección de N° de Nota y Puesto"""
+    
+    # Obtener todas las notas recientes (últimas 100) para seleccionar
+    notas_recientes = Nota.query.order_by(Nota.id.desc()).limit(100).all()
+    
+    # Obtener notas únicas
+    nros_nota = sorted(set([n.nro_nota for n in notas_recientes]))
+    puestos = sorted(set([n.puesto for n in notas_recientes]))
+    
+    # Crear options para los selects
+    nro_options = "".join([f'<option value="{nro}">{nro}</option>' for nro in nros_nota])
+    puesto_options = "".join([f'<option value="{p}">{p}</option>' for p in puestos])
+    
     wsp_link = None
     if WHATSAPP_NUMBER:
         import urllib.parse
@@ -1370,13 +1672,35 @@ def operador_reportar_inicio():
 <div class="panel">
   <h2>🚨 Reportar Error</h2>
   <p style="margin-bottom:20px;">
-    Si completaste mal una nota, reportalo acá. Queda registrado en la base como "error" para que el admin lo corrija.
+    Si completaste mal una nota, reportalo acá. Seleccioná el N° de Nota y Puesto, y describí el problema.
   </p>
   {wsp_button}
 </div>
 
 <div class="panel">
   <form method="POST" action="{url_for('operador_reportar')}">
+    <div class="grid">
+      <div class="form-group">
+        <label>N° de Nota (seleccioná o escribí)</label>
+        <input list="nros_nota_list" name="nro_nota" placeholder="Seleccioná o escribí el N° de nota">
+        <datalist id="nros_nota_list">
+          <option value="">-- Seleccionar --</option>
+          {nro_options}
+        </datalist>
+        <p class="small-text">Podés seleccionar de la lista o escribir manualmente si no aparece.</p>
+      </div>
+      
+      <div class="form-group">
+        <label>Puesto (seleccioná o escribí)</label>
+        <input list="puestos_list" name="puesto" placeholder="Seleccioná o escribí el puesto">
+        <datalist id="puestos_list">
+          <option value="">-- Seleccionar --</option>
+          {puesto_options}
+        </datalist>
+        <p class="small-text">Podés seleccionar de la lista o escribir manualmente si no aparece.</p>
+      </div>
+    </div>
+    
     <div class="form-group">
       <label>Detalle del problema</label>
       <textarea name="detalle" rows="5" required placeholder="Describí qué cargaste mal o qué necesitás corregir..."></textarea>
@@ -1386,51 +1710,56 @@ def operador_reportar_inicio():
     <a href="{url_for('operador_home')}" class="btn btn-secondary">← Cancelar</a>
   </form>
 </div>
+
+<style>
+input[list] {{
+  background-image: url('data:image/svg+xml;utf8,<svg fill="gray" height="24" viewBox="0 0 24 24" width="24" xmlns="http://www.w3.org/2000/svg"><path d="M7 10l5 5 5-5z"/></svg>');
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 20px;
+  cursor: pointer;
+}}
+</style>
 """
     
     return render_template_string(render_page("Reportar Error", content, show_op_nav=True))
 
 
-@app.route("/operador/reportar", methods=["GET", "POST"])
+@app.route("/operador/reportar", methods=["POST"])
 @login_required
 @role_required(OP_ROLE)
 def operador_reportar():
-    nota_id = request.args.get("nota_id") or request.form.get("nota_id")
-    puesto = request.args.get("puesto") or request.form.get("puesto")
-    
-    nota = None
-    if nota_id:
-        nota = db.session.get(Nota, int(nota_id))
-    
-    if request.method == "POST":
-        try:
-            detalle = sanitize_text(request.form.get("detalle", ""), max_len=1000)
-            if not detalle:
-                flash("El detalle es obligatorio.", "danger")
-                return redirect(request.url)
+    try:
+        nro_nota = sanitize_text(request.form.get("nro_nota", ""))
+        puesto = sanitize_text(request.form.get("puesto", ""))
+        detalle = sanitize_text(request.form.get("detalle", ""), max_len=1000)
+        
+        if not detalle:
+            flash("El detalle es obligatorio.", "danger")
+            return redirect(url_for("operador_reportar_inicio"))
+        
+        # Intentar encontrar la nota correspondiente
+        nota = None
+        if nro_nota and puesto:
+            nota = Nota.query.filter_by(nro_nota=nro_nota, puesto=puesto).first()
+        
+        err = ErrorReporte(
+            nota_id=nota.id if nota else None,
+            nro_nota=nro_nota or None,
+            puesto=puesto or None,
+            reportado_por=current_user.username,
+            detalle=detalle
+        )
+        db.session.add(err)
+        db.session.commit()
+        
+        flash("✅ Reporte enviado. El admin lo revisará.", "success")
+        return redirect(url_for("operador_home"))
             
-            err = ErrorReporte(
-                nota_id=nota.id if nota else None,
-                nro_nota=nota.nro_nota if nota else None,
-                puesto=nota.puesto if nota else (puesto or ""),
-                reportado_por=current_user.username,
-                detalle=detalle
-            )
-            db.session.add(err)
-            db.session.commit()
-            
-            flash("✅ Reporte enviado. El admin lo revisará.", "success")
-            
-            if nota:
-                return redirect(url_for("operador_puesto", puesto=nota.puesto))
-            else:
-                return redirect(url_for("operador_home"))
-                
-        except Exception as e:
-            db.session.rollback()
-            flash(f"Error al enviar reporte: {str(e)}", "danger")
-    
-    return redirect(url_for("operador_reportar_inicio"))
+    except Exception as e:
+        db.session.rollback()
+        flash(f"Error al enviar reporte: {str(e)}", "danger")
+        return redirect(url_for("operador_reportar_inicio"))
 
 
 # =========================
@@ -1460,3 +1789,4 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     debug = _bool_env("FLASK_DEBUG", False)
     app.run(host="0.0.0.0", port=port, debug=debug)
+
