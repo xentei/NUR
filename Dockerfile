@@ -9,6 +9,7 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py /app/app.py
+COPY templates /app/templates
 
 # Railway sets PORT automatically
 CMD sh -c "gunicorn -w 2 -b 0.0.0.0:${PORT:-8080} app:app"
