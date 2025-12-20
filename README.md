@@ -3,10 +3,16 @@
 ## Local
 ```powershell
 python -m venv venv
-.env\Scripts\activate
-pip install -r requirements.txt
-$env:FLASK_DEBUG="1"
-python app.py
+$env:SECRET_KEY="definí-una-clave-segura"
+$env:ADMIN_USER="admin"
+$env:ADMIN_PASS="cambiame"
+$env:OP_USER="PSA"
+$env:OP_PASS="cambiame"
+Usuarios iniciales: si la DB está vacía se crearán al iniciar, pero **solo si** definiste las variables anteriores.
+Variables requeridas (fallará el arranque si faltan):
+- SECRET_KEY
+
+Variables opcionales:
 ```
 Abrí: http://127.0.0.1:5000
 
