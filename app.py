@@ -338,11 +338,12 @@ def validate_puesto(raw: str, max_len: int = 50) -> tuple[bool, str]:
 
 
 def resolve_puesto_choice(selected: str, otro: str = "") -> tuple[bool, str]:
-    selected_norm = _normalize_puesto_label(selected)
+    raw_input = sanitize_text(selected, max_len=80)
+    selected_norm = _normalize_puesto_label(raw_input)
     otro_norm = _normalize_puesto_label(otro)
 
-    if selected_norm in PUESTOS_PREDEFINIDOS and selected_norm != "OTRO":
-        return True, selected_norm
+    if not selected_norm:
+        return False, "Elegí un puesto de la lista."
 
     if selected_norm == "OTRO":
         if not otro_norm:
@@ -350,9 +351,12 @@ def resolve_puesto_choice(selected: str, otro: str = "") -> tuple[bool, str]:
         ok, cleaned = validate_puesto(otro_norm)
         return ok, cleaned.upper() if ok else cleaned
 
-    # Compatibilidad con datos previos: validar cualquier texto válido
-    ok, cleaned = validate_puesto(selected_norm)
-    return ok, cleaned.upper() if ok else cleaned
+    if selected_norm in PUESTOS_PREDEFINIDOS:
+        if raw_input and raw_input.upper() != selected_norm:
+            return False, f"Puesto no válido. Probá con {selected_norm}."
+        return True, selected_norm
+
+    return False, "Puesto no válido. Elegí uno de la lista o seleccioná OTRO."
 
 
 def puesto_select_component(
@@ -608,6 +612,7 @@ def admin_home():
     flt_nro = request.args.get("nro_nota", "").strip()
     flt_aut = request.args.get("autoriza", "").strip()
     flt_puesto = request.args.get("puesto", "").strip()
+    draft_admin = session.pop("draft_admin", {})
     
     q = Nota.query
     if flt_nro:
@@ -620,6 +625,11 @@ def admin_home():
     notas = q.order_by(Nota.id.desc()).limit(250).all()
 
     catalog_options = "".join([f'<option value="{p}">{p}</option>' for p in PUESTOS_PREDEFINIDOS])
+
+    draft_nro = draft_admin.get("nro_nota", "")
+    draft_aut = draft_admin.get("autoriza", "")
+    draft_predef = draft_admin.get("puesto_predef", "")
+    draft_otro = draft_admin.get("puesto_otro", "")
 
     content = f"""
 <div class="panel panel-highlight">
@@ -635,17 +645,17 @@ def admin_home():
     <div class="grid">
       <div class="form-group">
         <label>N° Nota</label>
-        <input type="text" name="nro_nota" required placeholder="Ej: 9983; 9982; 9992" />
+        <input type="text" name="nro_nota" required placeholder="Ej: 9983; 9982; 9992" value="{draft_nro}" />
       </div>
       <div class="form-group">
         <label>Autoriza</label>
         <select name="autoriza" required>
           <option value="">-- Seleccionar --</option>
-          <option value="AVSEC">AVSEC</option>
-          <option value="OPER">OPER</option>
+          <option value="AVSEC" {'selected' if draft_aut=='AVSEC' else ''}>AVSEC</option>
+          <option value="OPER" {'selected' if draft_aut=='OPER' else ''}>OPER</option>
         </select>
       </div>
-      {puesto_select_component()}
+      {puesto_select_component(selected=draft_predef, other_value=draft_otro)}
     </div>
     <button type="submit" class="btn btn-success" style="width:100%; font-size:16px;">✅ Crear Nota</button>
   </form>
@@ -741,21 +751,33 @@ def admin_home():
 @role_required(ADMIN_ROLE)
 def admin_crear_nota():
     try:
-        nro_list = parse_nro_list(request.form.get("nro_nota", ""))
-        autoriza = sanitize_text(request.form.get("autoriza", ""), max_len=10)
+        draft = {
+            "nro_nota": request.form.get("nro_nota", ""),
+            "autoriza": request.form.get("autoriza", ""),
+            "puesto_predef": request.form.get("puesto_predef", ""),
+            "puesto_otro": request.form.get("puesto_otro", ""),
+        }
+        nro_list = parse_nro_list(draft["nro_nota"])
+        autoriza = sanitize_text(draft["autoriza"], max_len=10)
         ok_puesto, puesto = resolve_puesto_choice(
-            request.form.get("puesto_predef", ""),
-            request.form.get("puesto_otro", ""),
+            draft["puesto_predef"],
+            draft["puesto_otro"],
         )
         if not ok_puesto:
+            session["draft_admin"] = draft
+            session.modified = True
             flash(puesto, "danger")
             return redirect(url_for("admin_home"))
 
         if not nro_list or not autoriza or not puesto:
+            session["draft_admin"] = draft
+            session.modified = True
             flash("Todos los campos son obligatorios.", "danger")
             return redirect(url_for("admin_home"))
 
         if autoriza not in ["AVSEC", "OPER"]:
+            session["draft_admin"] = draft
+            session.modified = True
             flash("Autoriza debe ser AVSEC u OPER.", "danger")
             return redirect(url_for("admin_home"))
 
@@ -771,6 +793,7 @@ def admin_crear_nota():
 
         db.session.commit()
 
+        session.pop("draft_admin", None)
         flash(f"Notas creadas: {', '.join(nro_list)} - {puesto}", "success")
     except Exception as e:
         db.session.rollback()
@@ -1290,6 +1313,7 @@ def dop_home():
     flt_nro = request.args.get("nro_nota", "").strip()
     flt_aut = request.args.get("autoriza", "").strip()
     flt_puesto = request.args.get("puesto", "").strip()
+    draft_dop = session.pop("draft_dop", {})
     
     q = Nota.query
     if flt_nro:
@@ -1302,6 +1326,11 @@ def dop_home():
     notas = q.order_by(Nota.id.desc()).limit(250).all()
 
     catalog_options = "".join([f'<option value="{p}">{p}</option>' for p in PUESTOS_PREDEFINIDOS])
+
+    draft_nro = draft_dop.get("nro_nota", "")
+    draft_aut = draft_dop.get("autoriza", "")
+    draft_predef = draft_dop.get("puesto_predef", "")
+    draft_otro = draft_dop.get("puesto_otro", "")
 
     content = f"""
 <div class="panel panel-highlight">
@@ -1317,17 +1346,17 @@ def dop_home():
     <div class="grid">
       <div class="form-group">
         <label>N° Nota</label>
-        <input type="text" name="nro_nota" required placeholder="Ej: 9983; 9982; 9992" />
+        <input type="text" name="nro_nota" required placeholder="Ej: 9983; 9982; 9992" value="{draft_nro}" />
       </div>
       <div class="form-group">
         <label>Autoriza</label>
         <select name="autoriza" required>
           <option value="">-- Seleccionar --</option>
-          <option value="AVSEC">AVSEC</option>
-          <option value="OPER">OPER</option>
+          <option value="AVSEC" {'selected' if draft_aut=='AVSEC' else ''}>AVSEC</option>
+          <option value="OPER" {'selected' if draft_aut=='OPER' else ''}>OPER</option>
         </select>
       </div>
-      {puesto_select_component()}
+      {puesto_select_component(selected=draft_predef, other_value=draft_otro)}
     </div>
     <button type="submit" class="btn btn-success" style="width:100%; font-size:16px;">✅ Crear Nota</button>
   </form>
@@ -1413,21 +1442,33 @@ def dop_home():
 @role_required(DOP_ROLE)
 def dop_crear_nota():
     try:
-        nro_list = parse_nro_list(request.form.get("nro_nota", ""))
-        autoriza = sanitize_text(request.form.get("autoriza", ""), max_len=10)
+        draft = {
+            "nro_nota": request.form.get("nro_nota", ""),
+            "autoriza": request.form.get("autoriza", ""),
+            "puesto_predef": request.form.get("puesto_predef", ""),
+            "puesto_otro": request.form.get("puesto_otro", ""),
+        }
+        nro_list = parse_nro_list(draft["nro_nota"])
+        autoriza = sanitize_text(draft["autoriza"], max_len=10)
         ok_puesto, puesto = resolve_puesto_choice(
-            request.form.get("puesto_predef", ""),
-            request.form.get("puesto_otro", ""),
+            draft["puesto_predef"],
+            draft["puesto_otro"],
         )
         if not ok_puesto:
+            session["draft_dop"] = draft
+            session.modified = True
             flash(puesto, "danger")
             return redirect(url_for("dop_home"))
 
         if not nro_list or not autoriza or not puesto:
+            session["draft_dop"] = draft
+            session.modified = True
             flash("Todos los campos son obligatorios.", "danger")
             return redirect(url_for("dop_home"))
 
         if autoriza not in ["AVSEC", "OPER"]:
+            session["draft_dop"] = draft
+            session.modified = True
             flash("Autoriza debe ser AVSEC u OPER.", "danger")
             return redirect(url_for("dop_home"))
 
@@ -1443,6 +1484,7 @@ def dop_crear_nota():
 
         db.session.commit()
 
+        session.pop("draft_dop", None)
         flash(f"Notas creadas: {', '.join(nro_list)} - {puesto}", "success")
     except Exception as e:
         db.session.rollback()
