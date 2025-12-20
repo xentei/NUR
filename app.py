@@ -113,6 +113,56 @@ DOP_ROLE = "dop"
 OP_ROLE = "operador"
 VIEW_ROLE = "visor"
 
+PUESTOS_PREDEFINIDOS = [
+    "ADICIONAL OTV",
+    "ADICIONAL PARKING RIO",
+    "ADICIONAL PROVEEDORES",
+    "ADICIONAL TCA",
+    "ARRIBOS A2",
+    "ARRIBOS ADUANA",
+    "ARRIBOS MIGRACIONES",
+    "BARRERA CARGAS",
+    "C.O.C.",
+    "CABECERA NORTE",
+    "CABECERA SUR",
+    "CALABOZO CARGAS",
+    "CALABOZO ECO",
+    "CHECKPOINT",
+    "COMODORO PY",
+    "CONEXIONES ARSA",
+    "CONEXIONES INTER",
+    "CONEXIONES NACIONALES",
+    "CONSIGNA AVIANCA",
+    "D.O.C. METROPOLITANA",
+    "DEPOSITO VEHICULAR",
+    "GAMA",
+    "GATE GOURMET",
+    "GUARDIA DE PREVENCION",
+    "HALL",
+    "JET PAQ",
+    "MOVIL VUELOS PRIVADOS",
+    "OFICINA DE HALLAZGOS",
+    "OFICINA RAPSA",
+    "OVERZISE",
+    "PATIO DE VALIJAS",
+    "PATRULLA EXTERNA",
+    "PATRULLA PLATAFORMA",
+    "PERIMETRO INTERNO ALFA",
+    "PORTON AMA",
+    "PREEMBARQUE INTERNACIONAL",
+    "PREEMBARQUE NACIONAL",
+    "PUESTO BRAVO",
+    "PUESTO ECO",
+    "PUESTO PAMPA",
+    "SALA DE ARMAS",
+    "TORRE DE CONTROL",
+    "TRANSITO VEHICULAR",
+    "TURNO LOGISTICA",
+    "TURNO OPERACIONES",
+    "VUELOS PRIVADOS",
+    "Otro",
+]
+
 SECRET_KEY = _load_secret_key()
 
 WHATSAPP_NUMBER = os.getenv("WHATSAPP_NUMBER", "")
@@ -242,6 +292,43 @@ def validate_puesto(raw: str, max_len: int = 50) -> tuple[bool, str]:
     if not re.match(r"^[\w\s\-./]+$", raw):
         return False, "El puesto solo puede tener letras, números, espacios y -./"
     return True, raw
+
+
+def resolve_puesto_choice(selected: str, otro: str = "") -> tuple[bool, str]:
+    selected = sanitize_text(selected, max_len=60)
+    otro = sanitize_text(otro, max_len=60)
+
+    if selected in PUESTOS_PREDEFINIDOS and selected != "Otro":
+        return True, selected
+
+    if selected == "Otro":
+        if not otro:
+            return False, "Elegí un puesto o escribí uno en 'Otro'."
+        return validate_puesto(otro)
+
+    # Compatibilidad con datos previos: validar cualquier texto válido
+    return validate_puesto(selected)
+
+
+def puesto_select_component(select_name: str = "puesto_predef", other_name: str = "puesto_otro", selected: str = "", other_value: str = "") -> str:
+    options = "".join([
+        f'<option value="{p}" {"selected" if p == selected else ""}>{p}</option>'
+        for p in PUESTOS_PREDEFINIDOS
+    ])
+    show_other = "" if selected == "Otro" else "style=\"display:none;\""
+    return f"""
+    <div class="form-group">
+      <label>Puesto</label>
+      <div class="combobox">
+        <select name="{select_name}" id="{select_name}" onchange="toggleOtro(this, '{other_name}')">
+          <option value="">-- Seleccionar puesto --</option>
+          {options}
+        </select>
+        <input type="text" name="{other_name}" id="{other_name}" placeholder="Escribí el puesto" value="{other_value}" {show_other} />
+        <p class="small-text">Elegí un puesto de la lista. Si seleccionás "Otro", podés escribirlo.</p>
+      </div>
+    </div>
+    """
 
 
 # =========================
@@ -478,9 +565,11 @@ def admin_home():
         q = q.filter(Nota.autoriza == flt_aut)
     if flt_puesto:
         q = q.filter(Nota.puesto.contains(flt_puesto))
-    
+
     notas = q.order_by(Nota.id.desc()).limit(250).all()
-    
+
+    catalog_options = "".join([f'<option value="{p}">{p}</option>' for p in PUESTOS_PREDEFINIDOS])
+
     content = f"""
 <div class="panel panel-highlight">
   <h2>📝 REGISTRAR NOTA</h2>
@@ -505,10 +594,7 @@ def admin_home():
           <option value="OPER">OPER</option>
         </select>
       </div>
-      <div class="form-group">
-        <label>Puesto</label>
-        <input type="text" name="puesto" required placeholder="Ej: GATE A3, PAMPA, etc." />
-      </div>
+      {puesto_select_component()}
     </div>
     <button type="submit" class="btn btn-success" style="width:100%; font-size:16px;">✅ Crear Nota</button>
   </form>
@@ -532,7 +618,11 @@ def admin_home():
       </div>
       <div class="form-group">
         <label>Filtrar por Puesto</label>
-        <input type="text" name="puesto" value="{flt_puesto}" />
+        <input type="text" name="puesto" value="{flt_puesto}" list="catalog_puestos" placeholder="Escribí o elegí" />
+        <datalist id="catalog_puestos">
+          <option value="">-- Seleccionar --</option>
+          {catalog_options}
+        </datalist>
       </div>
     </div>
     <div class="action-row">
@@ -602,7 +692,10 @@ def admin_crear_nota():
     try:
         nro_nota = sanitize_text(request.form.get("nro_nota", ""), max_len=50)
         autoriza = sanitize_text(request.form.get("autoriza", ""), max_len=10)
-        ok_puesto, puesto = validate_puesto(request.form.get("puesto", ""))
+        ok_puesto, puesto = resolve_puesto_choice(
+            request.form.get("puesto_predef", ""),
+            request.form.get("puesto_otro", ""),
+        )
         if not ok_puesto:
             flash(puesto, "danger")
             return redirect(url_for("admin_home"))
@@ -1069,6 +1162,8 @@ def visor_home():
         ]
     )
 
+    catalog_options = "".join([f'<option value="{p}">{p}</option>' for p in PUESTOS_PREDEFINIDOS])
+
     content = f"""
 <div class="panel">
   <h2>📋 Notas (solo lectura)</h2>
@@ -1088,7 +1183,11 @@ def visor_home():
     </div>
     <div class="form-group">
       <label>Puesto</label>
-      <input type="text" name="puesto" value="{flt_puesto}" placeholder="Ej: GATE A1" />
+      <input type="text" name="puesto" value="{flt_puesto}" list="catalog_puestos" placeholder="Ej: GATE A1" />
+      <datalist id="catalog_puestos">
+        <option value="">-- Seleccionar --</option>
+        {catalog_options}
+      </datalist>
     </div>
     <div class="form-group">
       <label>Estado</label>
@@ -1146,9 +1245,11 @@ def dop_home():
         q = q.filter(Nota.autoriza == flt_aut)
     if flt_puesto:
         q = q.filter(Nota.puesto.contains(flt_puesto))
-    
+
     notas = q.order_by(Nota.id.desc()).limit(250).all()
-    
+
+    catalog_options = "".join([f'<option value="{p}">{p}</option>' for p in PUESTOS_PREDEFINIDOS])
+
     content = f"""
 <div class="panel panel-highlight">
   <h2>📝 REGISTRAR NOTA</h2>
@@ -1173,10 +1274,7 @@ def dop_home():
           <option value="OPER">OPER</option>
         </select>
       </div>
-      <div class="form-group">
-        <label>Puesto</label>
-        <input type="text" name="puesto" required placeholder="Ej: GATE A3, PAMPA, etc." />
-      </div>
+      {puesto_select_component()}
     </div>
     <button type="submit" class="btn btn-success" style="width:100%; font-size:16px;">✅ Crear Nota</button>
   </form>
@@ -1200,7 +1298,11 @@ def dop_home():
       </div>
       <div class="form-group">
         <label>Filtrar por Puesto</label>
-        <input type="text" name="puesto" value="{flt_puesto}" />
+        <input type="text" name="puesto" value="{flt_puesto}" list="catalog_puestos_dop" />
+        <datalist id="catalog_puestos_dop">
+          <option value="">-- Seleccionar --</option>
+          {catalog_options}
+        </datalist>
       </div>
     </div>
     <button type="submit" class="btn btn-primary">🔍 Filtrar</button>
@@ -1260,7 +1362,10 @@ def dop_crear_nota():
     try:
         nro_nota = sanitize_text(request.form.get("nro_nota", ""), max_len=50)
         autoriza = sanitize_text(request.form.get("autoriza", ""), max_len=10)
-        ok_puesto, puesto = validate_puesto(request.form.get("puesto", ""))
+        ok_puesto, puesto = resolve_puesto_choice(
+            request.form.get("puesto_predef", ""),
+            request.form.get("puesto_otro", ""),
+        )
         if not ok_puesto:
             flash(puesto, "danger")
             return redirect(url_for("dop_home"))
@@ -1733,11 +1838,11 @@ def operador_completar_nota(nota_id: int):
 @role_required(OP_ROLE)
 def operador_reportar_inicio():
     """Formulario mejorado para reportar errores con selección de N° de Nota y Puesto"""
-    
+
     notas_recientes = Nota.query.order_by(Nota.id.desc()).limit(100).all()
-    
+
     nros_nota = sorted(set([n.nro_nota for n in notas_recientes]))
-    puestos = sorted(set([n.puesto for n in notas_recientes]))
+    puestos = sorted(set([n.puesto for n in notas_recientes]) | set(PUESTOS_PREDEFINIDOS))
     
     nro_options = "".join([f'<option value="{nro}">{nro}</option>' for nro in nros_nota])
     puesto_options = "".join([f'<option value="{p}">{p}</option>' for p in puestos])

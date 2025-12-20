@@ -116,6 +116,12 @@
     box-shadow: 0 0 0 3px var(--primary-soft);
   }
 
+  .combobox {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
   table {
     width: 100%;
     border-collapse: collapse;
@@ -354,5 +360,18 @@
     {{ content_html|safe }}
   </div>
 </div>
+<script>
+function toggleOtro(selectEl, otherId) {
+  const otherInput = document.getElementById(otherId);
+  if (!otherInput) return;
+  if (selectEl.value === 'Otro') {
+    otherInput.style.display = '';
+    otherInput.focus();
+  } else {
+    otherInput.style.display = 'none';
+    otherInput.value = '';
+  }
+}
+</script>
 </body>
 </html>
