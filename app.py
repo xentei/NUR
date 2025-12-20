@@ -51,16 +51,10 @@ os.makedirs(INSTANCE_DIR, exist_ok=True)
 DB_PATH = os.getenv("NUR_DB_PATH", os.path.join(INSTANCE_DIR, "nur.db"))
 DB_URI = os.getenv("DATABASE_URL")
 
-DB_URI = os.getenv("DATABASE_URL")
-
 if DB_URI:
-    # Railway a veces entrega postgres:// y SQLAlchemy espera postgresql://
-    if DB_URI.startswith("postgres://"):
-        DB_URI = DB_URI.replace("postgres://", "postgresql://", 1)
     SQLALCHEMY_DATABASE_URI = DB_URI
 else:
     SQLALCHEMY_DATABASE_URI = "sqlite:///" + DB_PATH.replace("\\", "/")
-
 
 # =========================
 # App init
@@ -71,10 +65,8 @@ app.config["SQLALCHEMY_DATABASE_URI"] = SQLALCHEMY_DATABASE_URI
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
     "pool_pre_ping": True,
-    if SQLALCHEMY_DATABASE_URI.startswith("sqlite:"):
-    engine_opts["connect_args"] = {"check_same_thread": False}
-
-app.config["SQLALCHEMY_ENGINE_OPTIONS"] = engine_opts
+    "connect_args": {"check_same_thread": False},
+}
 
 # Proxy fix para Railway/Render
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
@@ -487,10 +479,106 @@ BASE_HTML = r"""
 </html>
 """
 
-LOGIN_HTML = BASE_HTML + r"""
-{% block login %}
+# Cambiá el LOGIN_HTML por esto:
+
+LOGIN_HTML = r"""
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>{{ title }}</title>
+<style>
+  :root {
+    --primary: #2563eb;
+    --success: #16a34a;
+    --danger: #dc2626;
+    --warning: #f59e0b;
+    --dark: #1f2937;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { 
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    min-height: 100vh;
+    padding: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .login-box {
+    max-width: 450px;
+    width: 100%;
+    background: white;
+    padding: 40px;
+    border-radius: 12px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+  }
+  .login-box h1 {
+    color: var(--dark);
+    margin-bottom: 30px;
+    text-align: center;
+  }
+  .form-group {
+    margin-bottom: 20px;
+  }
+  .form-group label {
+    display: block;
+    font-weight: 600;
+    margin-bottom: 8px;
+    color: var(--dark);
+  }
+  .form-group input {
+    width: 100%;
+    padding: 12px;
+    border: 2px solid #e5e7eb;
+    border-radius: 6px;
+    font-size: 14px;
+    transition: border-color 0.3s;
+  }
+  .form-group input:focus {
+    outline: none;
+    border-color: var(--primary);
+  }
+  .btn {
+    padding: 12px 20px;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 600;
+    text-decoration: none;
+    display: inline-block;
+    transition: all 0.3s;
+  }
+  .btn-primary { background: var(--primary); color: white; }
+  .btn-primary:hover { background: #1d4ed8; transform: translateY(-2px); }
+  .small-text {
+    font-size: 13px;
+    color: #6b7280;
+    margin-top: 5px;
+  }
+  .alert {
+    padding: 15px 20px;
+    border-radius: 8px;
+    margin-bottom: 20px;
+    font-weight: 500;
+  }
+  .alert-danger { background: #fee2e2; color: #991b1b; border-left: 4px solid var(--danger); }
+</style>
+</head>
+<body>
 <div class="login-box">
   <h1>🔐 {{ APP_NAME }}</h1>
+  
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      {% for category, message in messages %}
+        <div class="alert alert-{{ category }}">{{ message }}</div>
+      {% endfor %}
+    {% endif %}
+  {% endwith %}
+  
   <form method="POST">
     <div class="form-group">
       <label>Usuario</label>
@@ -506,7 +594,8 @@ LOGIN_HTML = BASE_HTML + r"""
     Usá tu usuario y contraseña.
   </p>
 </div>
-{% endblock %}
+</body>
+</html>
 """
 
 ADMIN_HOME_HTML = BASE_HTML + r"""
