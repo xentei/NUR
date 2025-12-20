@@ -1911,8 +1911,8 @@ def operador_completar_nota(nota_id: int):
     {csrf_field()}
     <div class="form-row">
       <div class="form-group">
-        <label>Entrega - Nombre</label>
-        <input type="text" name="entrega_nombre" class="{_err(entrega_nombre_err)}" value="{pre.get('entrega_nombre', '')}" required />
+        <label>Entrega - Nombre y Apellido</label>
+        <input type="text" name="entrega_nombre" class="{_err(entrega_nombre_err)}" value="{pre.get('entrega_nombre', '')}" required placeholder="Nombre y Apellido" />
         {f'<p class="error-text">{entrega_nombre_err}</p>' if entrega_nombre_err else ''}
       </div>
       <div class="form-group">
@@ -1923,8 +1923,8 @@ def operador_completar_nota(nota_id: int):
     </div>
     <div class="form-row">
       <div class="form-group">
-        <label>Recibe - Nombre</label>
-        <input type="text" name="recibe_nombre" class="{_err(recibe_nombre_err)}" value="{pre.get('recibe_nombre', '')}" required />
+        <label>Recibe - Nombre y Apellido</label>
+        <input type="text" name="recibe_nombre" class="{_err(recibe_nombre_err)}" value="{pre.get('recibe_nombre', '')}" required placeholder="Nombre y Apellido" />
         {f'<p class="error-text">{recibe_nombre_err}</p>' if recibe_nombre_err else ''}
       </div>
       <div class="form-group">
