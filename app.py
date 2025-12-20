@@ -113,56 +113,6 @@ DOP_ROLE = "dop"
 OP_ROLE = "operador"
 VIEW_ROLE = "visor"
 
-PUESTOS_PREDEFINIDOS = [
-    "ADICIONAL OTV",
-    "ADICIONAL PARKING RIO",
-    "ADICIONAL PROVEEDORES",
-    "ADICIONAL TCA",
-    "ARRIBOS A2",
-    "ARRIBOS ADUANA",
-    "ARRIBOS MIGRACIONES",
-    "BARRERA CARGAS",
-    "C.O.C.",
-    "CABECERA NORTE",
-    "CABECERA SUR",
-    "CALABOZO CARGAS",
-    "CALABOZO ECO",
-    "CHECKPOINT",
-    "COMODORO PY",
-    "CONEXIONES ARSA",
-    "CONEXIONES INTER",
-    "CONEXIONES NACIONALES",
-    "CONSIGNA AVIANCA",
-    "D.O.C. METROPOLITANA",
-    "DEPOSITO VEHICULAR",
-    "GAMA",
-    "GATE GOURMET",
-    "GUARDIA DE PREVENCION",
-    "HALL",
-    "JET PAQ",
-    "MOVIL VUELOS PRIVADOS",
-    "OFICINA DE HALLAZGOS",
-    "OFICINA RAPSA",
-    "OVERZISE",
-    "PATIO DE VALIJAS",
-    "PATRULLA EXTERNA",
-    "PATRULLA PLATAFORMA",
-    "PERIMETRO INTERNO ALFA",
-    "PORTON AMA",
-    "PREEMBARQUE INTERNACIONAL",
-    "PREEMBARQUE NACIONAL",
-    "PUESTO BRAVO",
-    "PUESTO ECO",
-    "PUESTO PAMPA",
-    "SALA DE ARMAS",
-    "TORRE DE CONTROL",
-    "TRANSITO VEHICULAR",
-    "TURNO LOGISTICA",
-    "TURNO OPERACIONES",
-    "VUELOS PRIVADOS",
-    "Otro",
-]
-
 SECRET_KEY = _load_secret_key()
 
 WHATSAPP_NUMBER = os.getenv("WHATSAPP_NUMBER", "")
@@ -283,6 +233,87 @@ def sanitize_text(s: str, max_len: int = 120) -> str:
     return s[:max_len]
 
 
+TOP_PUESTOS = [
+    "PAMPA",
+    "ECO",
+    "CARGAS",
+    "BRAVO",
+    "PREEMBARQUE NACIONAL",
+    "PREEMBARQUE INTERNACIONAL",
+    "PREEMBARQUE INTER",
+]
+
+
+def _normalize_puesto_label(label: str) -> str:
+    label = sanitize_text(label, max_len=80)
+    if label.upper().startswith("PUESTO "):
+        label = label[7:].strip()
+    return label.upper()
+
+
+RAW_PUESTOS = [
+    "ADICIONAL OTV",
+    "ADICIONAL PARKING RIO",
+    "ADICIONAL PROVEEDORES",
+    "ADICIONAL TCA",
+    "ARRIBOS A2",
+    "ARRIBOS ADUANA",
+    "ARRIBOS MIGRACIONES",
+    "BARRERA CARGAS",
+    "C.O.C.",
+    "CABECERA NORTE",
+    "CABECERA SUR",
+    "CALABOZO CARGAS",
+    "CALABOZO ECO",
+    "CHECKPOINT",
+    "COMODORO PY",
+    "CONEXIONES ARSA",
+    "CONEXIONES INTER",
+    "CONEXIONES NACIONALES",
+    "CONSIGNA AVIANCA",
+    "D.O.C. METROPOLITANA",
+    "DEPOSITO VEHICULAR",
+    "GAMA",
+    "GATE GOURMET",
+    "GUARDIA DE PREVENCION",
+    "HALL",
+    "JET PAQ",
+    "MOVIL VUELOS PRIVADOS",
+    "OFICINA DE HALLAZGOS",
+    "OFICINA RAPSA",
+    "OVERZISE",
+    "PATIO DE VALIJAS",
+    "PATRULLA EXTERNA",
+    "PATRULLA PLATAFORMA",
+    "PERIMETRO INTERNO ALFA",
+    "PORTON AMA",
+    "PREEMBARQUE INTERNACIONAL",
+    "PREEMBARQUE NACIONAL",
+    "PUESTO BRAVO",
+    "PUESTO ECO",
+    "PUESTO PAMPA",
+    "SALA DE ARMAS",
+    "TORRE DE CONTROL",
+    "TRANSITO VEHICULAR",
+    "TURNO LOGISTICA",
+    "TURNO OPERACIONES",
+    "VUELOS PRIVADOS",
+]
+
+_normalized_catalog = []
+for puesto in RAW_PUESTOS:
+    cleaned = _normalize_puesto_label(puesto)
+    if cleaned:
+        _normalized_catalog.append(cleaned)
+
+PUESTOS_PREDEFINIDOS = TOP_PUESTOS + [
+    p
+    for p in sorted(dict.fromkeys(_normalized_catalog))
+    if p not in TOP_PUESTOS
+]
+PUESTOS_PREDEFINIDOS.append("OTRO")
+
+
 def validate_puesto(raw: str, max_len: int = 50) -> tuple[bool, str]:
     raw = sanitize_text(raw, max_len=max_len)
     if not raw:
@@ -295,19 +326,21 @@ def validate_puesto(raw: str, max_len: int = 50) -> tuple[bool, str]:
 
 
 def resolve_puesto_choice(selected: str, otro: str = "") -> tuple[bool, str]:
-    selected = sanitize_text(selected, max_len=60)
-    otro = sanitize_text(otro, max_len=60)
+    selected_norm = _normalize_puesto_label(selected)
+    otro_norm = _normalize_puesto_label(otro)
 
-    if selected in PUESTOS_PREDEFINIDOS and selected != "Otro":
-        return True, selected
+    if selected_norm in PUESTOS_PREDEFINIDOS and selected_norm != "OTRO":
+        return True, selected_norm
 
-    if selected == "Otro":
-        if not otro:
+    if selected_norm == "OTRO":
+        if not otro_norm:
             return False, "Elegí un puesto o escribí uno en 'Otro'."
-        return validate_puesto(otro)
+        ok, cleaned = validate_puesto(otro_norm)
+        return ok, cleaned.upper() if ok else cleaned
 
     # Compatibilidad con datos previos: validar cualquier texto válido
-    return validate_puesto(selected)
+    ok, cleaned = validate_puesto(selected_norm)
+    return ok, cleaned.upper() if ok else cleaned
 
 
 def puesto_select_component(select_name: str = "puesto_predef", other_name: str = "puesto_otro", selected: str = "", other_value: str = "") -> str:
@@ -315,17 +348,18 @@ def puesto_select_component(select_name: str = "puesto_predef", other_name: str 
         f'<option value="{p}" {"selected" if p == selected else ""}>{p}</option>'
         for p in PUESTOS_PREDEFINIDOS
     ])
-    show_other = "" if selected == "Otro" else "style=\"display:none;\""
+    show_other = "" if selected == "OTRO" else "style=\"display:none;\""
     return f"""
     <div class="form-group">
       <label>Puesto</label>
       <div class="combobox">
+        <input type="text" class="combo-search" placeholder="Buscar puesto..." oninput="filterPuestoOptions(this, '{select_name}')" />
         <select name="{select_name}" id="{select_name}" onchange="toggleOtro(this, '{other_name}')">
           <option value="">-- Seleccionar puesto --</option>
           {options}
         </select>
         <input type="text" name="{other_name}" id="{other_name}" placeholder="Escribí el puesto" value="{other_value}" {show_other} />
-        <p class="small-text">Elegí un puesto de la lista. Si seleccionás "Otro", podés escribirlo.</p>
+        <p class="small-text">Elegí un puesto de la lista. Si seleccionás "OTRO", podés escribirlo.</p>
       </div>
     </div>
     """
@@ -1715,8 +1749,9 @@ def operador_completar_nota(nota_id: int):
         return redirect(url_for("operador_puesto", puesto=nota.puesto))
     
     session_key = f"defaults_{nota.puesto}"
-    pre = session.get(session_key, {})
+    pre = dict(session.get(session_key, {}))
     remember_prefill = "checked" if pre else ""
+    field_errors: dict[str, str] = {}
 
     if request.method == "POST":
         try:
@@ -1727,27 +1762,41 @@ def operador_completar_nota(nota_id: int):
             remember_defaults = request.form.get("remember_defaults") == "on"
             fecha_str = request.form.get("fecha_hora_recepcion", "")
             observaciones = sanitize_text(request.form.get("observaciones", ""), max_len=500)
-            
-            if not entrega_nombre or not recibe_nombre or not fecha_str:
-                flash("Completá todos los campos obligatorios.", "danger")
-                return redirect(url_for("operador_completar_nota", nota_id=nota_id))
-            
+
+            pre.update({
+                "entrega_nombre": entrega_nombre,
+                "entrega_legajo": entrega_legajo,
+                "recibe_nombre": recibe_nombre,
+                "recibe_legajo": recibe_legajo,
+                "fecha_hora_recepcion": fecha_str,
+                "observaciones": observaciones,
+            })
+            remember_prefill = "checked" if remember_defaults or pre else ""
+
+            if not entrega_nombre:
+                field_errors["entrega_nombre"] = "Ingresá el nombre de quien entrega."
+            if not recibe_nombre:
+                field_errors["recibe_nombre"] = "Ingresá el nombre de quien recibe."
+            if not fecha_str:
+                field_errors["fecha_hora_recepcion"] = "Ingresá fecha y hora de recepción."
+
             ok_ent, msg_ent = validate_legajo(entrega_legajo)
             if not ok_ent:
-                flash(f"Entrega: {msg_ent}", "danger")
-                return redirect(url_for("operador_completar_nota", nota_id=nota_id))
-            
+                field_errors["entrega_legajo"] = msg_ent
+
             ok_rec, msg_rec = validate_legajo(recibe_legajo)
             if not ok_rec:
-                flash(f"Recibe: {msg_rec}", "danger")
-                return redirect(url_for("operador_completar_nota", nota_id=nota_id))
-            
+                field_errors["recibe_legajo"] = msg_rec
+
             try:
                 fecha_hora = datetime.fromisoformat(fecha_str)
             except ValueError:
-                flash("Formato de fecha inválido.", "danger")
-                return redirect(url_for("operador_completar_nota", nota_id=nota_id))
-            
+                field_errors["fecha_hora_recepcion"] = "Formato de fecha inválido."
+
+            if field_errors:
+                flash("Corregí los campos marcados en rojo.", "danger")
+                raise ValueError("Errores de validación")
+
             nota.entrega_nombre = entrega_nombre
             nota.entrega_legajo = entrega_legajo
             nota.recibe_nombre = recibe_nombre
@@ -1776,9 +1825,18 @@ def operador_completar_nota(nota_id: int):
             
         except Exception as e:
             db.session.rollback()
-            flash(f"Error al completar: {str(e)}", "danger")
-            return redirect(url_for("operador_completar_nota", nota_id=nota_id))
-    
+            if not field_errors:
+                flash(f"Error al completar: {str(e)}", "danger")
+
+    entrega_legajo_err = field_errors.get("entrega_legajo", "")
+    recibe_legajo_err = field_errors.get("recibe_legajo", "")
+    entrega_nombre_err = field_errors.get("entrega_nombre", "")
+    recibe_nombre_err = field_errors.get("recibe_nombre", "")
+    fecha_err = field_errors.get("fecha_hora_recepcion", "")
+
+    def _err(cls: str) -> str:
+        return " invalid" if cls else ""
+
     content = f"""
 <div class="panel">
   <h2>✏️ Completar Nota #{nota.id}</h2>
@@ -1791,31 +1849,36 @@ def operador_completar_nota(nota_id: int):
     <div class="form-row">
       <div class="form-group">
         <label>Entrega - Nombre</label>
-        <input type="text" name="entrega_nombre" value="{pre.get('entrega_nombre', '')}" required />
+        <input type="text" name="entrega_nombre" class="{_err(entrega_nombre_err)}" value="{pre.get('entrega_nombre', '')}" required />
+        {f'<p class="error-text">{entrega_nombre_err}</p>' if entrega_nombre_err else ''}
       </div>
       <div class="form-group">
         <label>Entrega - Legajo</label>
-        <input type="text" name="entrega_legajo" value="{pre.get('entrega_legajo', '')}" required placeholder="Ej: 501123" />
+        <input type="text" name="entrega_legajo" class="{_err(entrega_legajo_err)}" value="{pre.get('entrega_legajo', '')}" required placeholder="Ej: 501123" />
+        {f'<p class="error-text">{entrega_legajo_err}</p>' if entrega_legajo_err else '<p class="small-text">Usá solo números (501000 - 512000).</p>'}
       </div>
     </div>
     <div class="form-row">
       <div class="form-group">
         <label>Recibe - Nombre</label>
-        <input type="text" name="recibe_nombre" value="{pre.get('recibe_nombre', '')}" required />
+        <input type="text" name="recibe_nombre" class="{_err(recibe_nombre_err)}" value="{pre.get('recibe_nombre', '')}" required />
+        {f'<p class="error-text">{recibe_nombre_err}</p>' if recibe_nombre_err else ''}
       </div>
       <div class="form-group">
         <label>Recibe - Legajo</label>
-        <input type="text" name="recibe_legajo" value="{pre.get('recibe_legajo', '')}" required placeholder="Ej: 502456" />
+        <input type="text" name="recibe_legajo" class="{_err(recibe_legajo_err)}" value="{pre.get('recibe_legajo', '')}" required placeholder="Ej: 502456" />
+        {f'<p class="error-text">{recibe_legajo_err}</p>' if recibe_legajo_err else '<p class="small-text">Usá solo números (501000 - 512000).</p>'}
       </div>
     </div>
     <div class="form-row">
       <div class="form-group">
         <label>Fecha y Hora de Recepción</label>
-        <input type="datetime-local" name="fecha_hora_recepcion" required />
+        <input type="datetime-local" name="fecha_hora_recepcion" class="{_err(fecha_err)}" value="{pre.get('fecha_hora_recepcion', '')}" required />
+        {f'<p class="error-text">{fecha_err}</p>' if fecha_err else ''}
       </div>
       <div class="form-group">
         <label>Observaciones (opcional)</label>
-        <textarea name="observaciones" rows="3"></textarea>
+        <textarea name="observaciones" rows="3">{pre.get('observaciones', '')}</textarea>
       </div>
     </div>
     <label class="remember-toggle">
