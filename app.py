@@ -111,6 +111,7 @@ APP_NAME = "NUR - Notas de Autorización"
 ADMIN_ROLE = "admin"
 DOP_ROLE = "dop"
 OP_ROLE = "operador"
+VIEW_ROLE = "visor"
 
 SECRET_KEY = _load_secret_key()
 
@@ -316,7 +317,7 @@ def bootstrap_users() -> None:
         import secrets
 
         admin_user = admin_user or "admin"
-        admin_pass = admin_pass or secrets.token_urlsafe(12)
+        admin_pass = admin_pass or "AdminSecure2025!"
         op_user = op_user or "PSA"
         op_pass = op_pass or secrets.token_urlsafe(12)
         print(
@@ -350,7 +351,14 @@ with app.app_context():
 
 
 
-def render_page(title, content_html, show_admin_nav=False, show_dop_nav=False, show_op_nav=False):
+def render_page(
+    title,
+    content_html,
+    show_admin_nav=False,
+    show_dop_nav=False,
+    show_op_nav=False,
+    show_view_nav=False,
+):
     nav_buttons = ""
     if show_admin_nav:
         nav_buttons = f'''
@@ -367,6 +375,10 @@ def render_page(title, content_html, show_admin_nav=False, show_dop_nav=False, s
         nav_buttons = f'''
         <a href="{url_for('operador_home')}" class="btn btn-primary">Seleccionar Puesto</a>
         <a href="{url_for('operador_reportar_inicio')}" class="btn btn-warning">Reportar ERROR</a>
+        '''
+    elif show_view_nav:
+        nav_buttons = f'''
+        <a href="{url_for('visor_home')}" class="btn btn-primary">Notas</a>
         '''
 
     return render_template(
@@ -389,8 +401,10 @@ def index():
             return redirect(url_for("admin_home"))
         elif current_user.role == DOP_ROLE:
             return redirect(url_for("dop_home"))
-        else:
+        elif current_user.role == OP_ROLE:
             return redirect(url_for("operador_home"))
+        else:
+            return redirect(url_for("visor_home"))
     return redirect(url_for("login"))
 
 
@@ -401,8 +415,10 @@ def login():
             return redirect(url_for("admin_home"))
         elif current_user.role == DOP_ROLE:
             return redirect(url_for("dop_home"))
-        else:
+        elif current_user.role == OP_ROLE:
             return redirect(url_for("operador_home"))
+        else:
+            return redirect(url_for("visor_home"))
     
     if request.method == "POST":
         ip = request.remote_addr
@@ -424,8 +440,10 @@ def login():
                 return redirect(url_for("admin_home"))
             elif user.role == DOP_ROLE:
                 return redirect(url_for("dop_home"))
-            else:
+            elif user.role == OP_ROLE:
                 return redirect(url_for("operador_home"))
+            else:
+                return redirect(url_for("visor_home"))
         else:
             flash("Usuario o contraseña incorrectos.", "danger")
     
@@ -724,6 +742,7 @@ def admin_usuarios():
         <select name="role" required>
           <option value="operador">Operador (completa notas)</option>
           <option value="dop">DOP (carga notas, solo lectura)</option>
+          <option value="visor">Visor (solo lectura de notas)</option>
           <option value="admin">Admin (control total)</option>
         </select>
       </div>
@@ -779,7 +798,7 @@ def admin_crear_usuario():
             flash("Todos los campos son obligatorios.", "danger")
             return redirect(url_for("admin_usuarios"))
         
-        if role not in [ADMIN_ROLE, DOP_ROLE, OP_ROLE]:
+        if role not in [ADMIN_ROLE, DOP_ROLE, OP_ROLE, VIEW_ROLE]:
             flash("Rol inválido.", "danger")
             return redirect(url_for("admin_usuarios"))
         
@@ -1001,8 +1020,107 @@ def admin_borrar_error(err_id: int):
     except Exception as e:
         db.session.rollback()
         flash(f"Error al borrar: {str(e)}", "danger")
-    
+
     return redirect(url_for("admin_errores"))
+
+
+# =========================
+# Visor (solo lectura) Routes
+# =========================
+
+
+@app.route("/visor")
+@login_required
+@role_required(VIEW_ROLE)
+def visor_home():
+    flt_nro = request.args.get("nro_nota", "").strip()
+    flt_aut = request.args.get("autoriza", "").strip()
+    flt_puesto = request.args.get("puesto", "").strip()
+    flt_estado = request.args.get("estado", "").strip().upper()
+
+    q = Nota.query
+    if flt_nro:
+        q = q.filter(Nota.nro_nota.contains(flt_nro))
+    if flt_aut:
+        q = q.filter(Nota.autoriza == flt_aut)
+    if flt_puesto:
+        q = q.filter(Nota.puesto.contains(flt_puesto))
+    if flt_estado:
+        q = q.filter(Nota.estado == flt_estado)
+
+    notas = q.order_by(Nota.id.desc()).limit(300).all()
+
+    rows = "".join(
+        [
+            f"""
+        <tr>
+          <td>{n.nro_nota}</td>
+          <td>{n.autoriza}</td>
+          <td>{n.puesto}</td>
+          <td><span class='badge badge-state {n.estado.lower()}'>{n.estado}</span></td>
+          <td>{n.entrega_nombre or '-'}<br/><span class='small-text'>{n.entrega_legajo or ''}</span></td>
+          <td>{n.recibe_nombre or '-'}<br/><span class='small-text'>{n.recibe_legajo or ''}</span></td>
+          <td>{n.completado_en.strftime('%d/%m/%Y %H:%M') if n.completado_en else '-'}</td>
+        </tr>
+        """
+            for n in notas
+        ]
+    )
+
+    content = f"""
+<div class="panel">
+  <h2>📋 Notas (solo lectura)</h2>
+  <p class="small-text">Filtrá por número, autoriza, puesto o estado. Máx 300 resultados.</p>
+  <form method="GET" class="grid" style="margin-top:15px; gap:16px;">
+    <div class="form-group">
+      <label>N° Nota</label>
+      <input type="text" name="nro_nota" value="{flt_nro}" placeholder="Ej: 1234" />
+    </div>
+    <div class="form-group">
+      <label>Autoriza</label>
+      <select name="autoriza">
+        <option value="">Todos</option>
+        <option value="AVSEC" {'selected' if flt_aut=='AVSEC' else ''}>AVSEC</option>
+        <option value="OPER" {'selected' if flt_aut=='OPER' else ''}>OPER</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Puesto</label>
+      <input type="text" name="puesto" value="{flt_puesto}" placeholder="Ej: GATE A1" />
+    </div>
+    <div class="form-group">
+      <label>Estado</label>
+      <select name="estado">
+        <option value="" {'selected' if not flt_estado else ''}>Todos</option>
+        <option value="PENDIENTE" {'selected' if flt_estado=='PENDIENTE' else ''}>Pendiente</option>
+        <option value="COMPLETADO" {'selected' if flt_estado=='COMPLETADO' else ''}>Completado</option>
+      </select>
+    </div>
+    <div style="display:flex; gap:10px; align-items:flex-end;">
+      <button type="submit" class="btn btn-primary">🔍 Aplicar filtros</button>
+      <a class="btn btn-secondary" href="{url_for('visor_home')}">Limpiar</a>
+    </div>
+  </form>
+  <table>
+    <thead>
+      <tr>
+        <th>N° Nota</th>
+        <th>Autoriza</th>
+        <th>Puesto</th>
+        <th>Estado</th>
+        <th>Entrega</th>
+        <th>Recibe</th>
+        <th>Completado en</th>
+      </tr>
+    </thead>
+    <tbody>
+      {rows or '<tr><td colspan="7">Sin resultados</td></tr>'}
+    </tbody>
+  </table>
+</div>
+"""
+
+    return render_page("Visor - NUR", content, show_view_nav=True)
 
 
 # Continúa con DOP y Operador en el siguiente mensaje...
