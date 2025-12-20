@@ -23,11 +23,53 @@ from werkzeug.security import generate_password_hash, check_password_hash
 # =========================
 # Config
 # =========================
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+RAILWAY_VOLUME_PATH = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "/data")
+INSTANCE_DIR = os.path.join(BASE_DIR, "instance")
+
+
 def _bool_env(name: str, default: bool = False) -> bool:
     v = os.getenv(name)
     if v is None:
         return default
     return v.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _load_secret_key() -> str:
+    env_key = os.getenv("SECRET_KEY")
+    if env_key:
+        return env_key
+
+    import secrets
+
+    if os.path.exists(RAILWAY_VOLUME_PATH):
+        secret_path = os.path.join(RAILWAY_VOLUME_PATH, "secret_key.txt")
+    else:
+        secret_path = os.path.join(INSTANCE_DIR, "secret_key.txt")
+        os.makedirs(INSTANCE_DIR, exist_ok=True)
+
+    if os.path.exists(secret_path):
+        with open(secret_path, "r", encoding="utf-8") as fh:
+            key = fh.read().strip()
+            if key:
+                print("🔑 SECRET_KEY cargado desde archivo persistente.")
+                return key
+
+    key = secrets.token_hex(32)
+    try:
+        os.makedirs(os.path.dirname(secret_path), exist_ok=True)
+        with open(secret_path, "w", encoding="utf-8") as fh:
+            fh.write(key)
+        print(
+            "⚠️ SECRET_KEY no está configurado; se generó uno y se guardó en "
+            f"{secret_path}. Usá la variable de entorno SECRET_KEY en producción."
+        )
+    except OSError:
+        print(
+            "⚠️ SECRET_KEY no está configurado; se generó uno efímero solo para esta instancia. "
+            "Usá la variable de entorno SECRET_KEY en producción."
+        )
+    return key
 
 
 APP_NAME = "NUR - Notas de Autorización"
@@ -42,17 +84,15 @@ if not SECRET_KEY:
 WHATSAPP_NUMBER = os.getenv("WHATSAPP_NUMBER", "")
 PUBLIC_WHATSAPP_TEXT = os.getenv(
     "WHATSAPP_TEXT",
-    "Hola, cargué mal una nota en el sistema NUR. ¿Me ayudan a corregirla?"
+    "Hola, cargué mal una nota en el sistema NUR. ¿Me ayudan a corregirla?",
 )
 
 # =========================
 # DATABASE CONFIG - PERSISTENTE
 # =========================
-BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 
 # Configuración para Railway con volumen persistente
 # En Railway, configurá un volumen montado en /data
-RAILWAY_VOLUME_PATH = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "/data")
 DB_URI = os.getenv("DATABASE_URL")
 
 if DB_URI:
@@ -66,11 +106,10 @@ else:
         print(f"📁 Usando base de datos persistente en: {DB_PATH}")
     else:
         # En local
-        INSTANCE_DIR = os.path.join(BASE_DIR, "instance")
         os.makedirs(INSTANCE_DIR, exist_ok=True)
         DB_PATH = os.path.join(INSTANCE_DIR, "nur.db")
         print(f"📁 Usando base de datos local en: {DB_PATH}")
-    
+
     SQLALCHEMY_DATABASE_URI = "sqlite:///" + DB_PATH.replace("\\", "/")
 
 # =========================
