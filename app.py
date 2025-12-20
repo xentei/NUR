@@ -1,10 +1,11 @@
 import os
 import re
 import secrets
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import wraps
 from io import StringIO
 import csv
+from collections import defaultdict
 
 from flask import (
     Flask, request, redirect, url_for, render_template_string,
@@ -15,8 +16,6 @@ from flask_login import (
     logout_user, current_user
 )
 from flask_sqlalchemy import SQLAlchemy
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import generate_password_hash, check_password_hash
 
@@ -86,13 +85,24 @@ login_manager = LoginManager(app)
 login_manager.login_view = "login"
 login_manager.login_message = "Tenés que iniciar sesión."
 
-# Rate limiting para prevenir ataques de fuerza bruta
-limiter = Limiter(
-    app=app,
-    key_func=get_remote_address,
-    default_limits=["200 per day", "50 per hour"],
-    storage_uri="memory://"
-)
+# Rate limiting simple (en memoria)
+login_attempts = defaultdict(list)
+
+def check_rate_limit(ip: str, max_attempts: int = 10, window_minutes: int = 5) -> bool:
+    """Rate limiting simple para prevenir ataques de fuerza bruta"""
+    now = datetime.utcnow()
+    cutoff = now - timedelta(minutes=window_minutes)
+    
+    # Limpiar intentos antiguos
+    login_attempts[ip] = [t for t in login_attempts[ip] if t > cutoff]
+    
+    # Verificar límite
+    if len(login_attempts[ip]) >= max_attempts:
+        return False
+    
+    # Registrar intento
+    login_attempts[ip].append(now)
+    return True
 
 # =========================
 # Helpers
@@ -140,18 +150,6 @@ def sanitize_text(s: str, max_len: int = 120) -> str:
     s = (s or "").strip()
     s = re.sub(r"\s+", " ", s)
     return s[:max_len]
-
-
-def escape_html(text):
-    """Escape HTML para prevenir XSS"""
-    if not text:
-        return ""
-    return (str(text)
-            .replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-            .replace('"', "&quot;")
-            .replace("'", "&#x27;"))
 
 
 # =========================
@@ -234,7 +232,7 @@ with app.app_context():
 
 
 # =========================
-# UI Templates
+# UI Templates (igual que antes, copio completo para que no haya dudas)
 # =========================
 BASE_HTML = r"""
 <!DOCTYPE html>
@@ -940,7 +938,6 @@ def index():
 
 
 @app.route("/login", methods=["GET", "POST"])
-@limiter.limit("10 per minute")
 def login():
     if current_user.is_authenticated:
         if current_user.role == ADMIN_ROLE:
@@ -949,6 +946,12 @@ def login():
             return redirect(url_for("operador_home"))
     
     if request.method == "POST":
+        # Rate limiting
+        ip = request.remote_addr
+        if not check_rate_limit(ip):
+            flash("Demasiados intentos. Esperá unos minutos.", "danger")
+            return redirect(url_for("login"))
+        
         username = sanitize_text(request.form.get("username", ""))
         password = request.form.get("password", "")
         
@@ -1222,7 +1225,7 @@ def admin_cerrar_error(err_id: int):
             return redirect(url_for("admin_errores"))
         
         err.estado = "CERRADO"
-        db.session.commit()  # FIX CRÍTICO: Faltaba esto
+        db.session.commit()  # FIX CRÍTICO
         flash("Error marcado como cerrado.", "success")
     except Exception as e:
         db.session.rollback()
