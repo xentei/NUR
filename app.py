@@ -51,10 +51,16 @@ os.makedirs(INSTANCE_DIR, exist_ok=True)
 DB_PATH = os.getenv("NUR_DB_PATH", os.path.join(INSTANCE_DIR, "nur.db"))
 DB_URI = os.getenv("DATABASE_URL")
 
+DB_URI = os.getenv("DATABASE_URL")
+
 if DB_URI:
+    # Railway a veces entrega postgres:// y SQLAlchemy espera postgresql://
+    if DB_URI.startswith("postgres://"):
+        DB_URI = DB_URI.replace("postgres://", "postgresql://", 1)
     SQLALCHEMY_DATABASE_URI = DB_URI
 else:
     SQLALCHEMY_DATABASE_URI = "sqlite:///" + DB_PATH.replace("\\", "/")
+
 
 # =========================
 # App init
@@ -65,8 +71,10 @@ app.config["SQLALCHEMY_DATABASE_URI"] = SQLALCHEMY_DATABASE_URI
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
     "pool_pre_ping": True,
-    "connect_args": {"check_same_thread": False},
-}
+    if SQLALCHEMY_DATABASE_URI.startswith("sqlite:"):
+    engine_opts["connect_args"] = {"check_same_thread": False}
+
+app.config["SQLALCHEMY_ENGINE_OPTIONS"] = engine_opts
 
 # Proxy fix para Railway/Render
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
