@@ -77,7 +77,9 @@ ADMIN_ROLE = "admin"
 DOP_ROLE = "dop"
 OP_ROLE = "operador"
 
-SECRET_KEY = _load_secret_key()
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY:
+    raise RuntimeError("SECRET_KEY es obligatorio. Definilo en variables de entorno.")
 
 WHATSAPP_NUMBER = os.getenv("WHATSAPP_NUMBER", "")
 PUBLIC_WHATSAPP_TEXT = os.getenv(
@@ -277,19 +279,18 @@ def bootstrap_users() -> None:
     op_user = os.getenv("OP_USER")
     op_pass = os.getenv("OP_PASS")
 
-    if not all([admin_user, admin_pass, op_user, op_pass]):
-        import secrets
+    missing = [name for name, val in [
+        ("ADMIN_USER", admin_user),
+        ("ADMIN_PASS", admin_pass),
+        ("OP_USER", op_user),
+        ("OP_PASS", op_pass),
+    ] if not val]
 
-        admin_user = admin_user or "admin"
-        admin_pass = admin_pass or secrets.token_urlsafe(12)
-        op_user = op_user or "PSA"
-        op_pass = op_pass or secrets.token_urlsafe(12)
-        print(
-            "⚠️ Credenciales iniciales generadas automáticamente (solo para esta instancia). "
-            "Definí ADMIN_USER/ADMIN_PASS/OP_USER/OP_PASS en producción."
+    if missing:
+        raise RuntimeError(
+            "Faltan variables de entorno para crear usuarios iniciales: "
+            + ", ".join(missing)
         )
-        print(f"   ADMIN_USER={admin_user} | ADMIN_PASS={admin_pass}")
-        print(f"   OP_USER={op_user} | OP_PASS={op_pass}")
 
     u1 = User(username=admin_user, role=ADMIN_ROLE)
     u1.set_password(admin_pass)
