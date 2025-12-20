@@ -1,6 +1,5 @@
 import os
 import re
-import secrets
 from datetime import datetime, timedelta
 from functools import wraps
 from io import StringIO
@@ -8,7 +7,7 @@ import csv
 from collections import defaultdict
 
 from flask import (
-    Flask, request, redirect, url_for, render_template_string,
+    Flask, request, redirect, url_for, render_template,
     flash, send_file, abort, session, Response
 )
 from flask_login import (
@@ -16,12 +15,19 @@ from flask_login import (
     logout_user, current_user
 )
 from flask_sqlalchemy import SQLAlchemy
+from flask_wtf.csrf import CSRFProtect, generate_csrf
+from markupsafe import Markup
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import generate_password_hash, check_password_hash
 
 # =========================
 # Config
 # =========================
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+RAILWAY_VOLUME_PATH = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "/data")
+INSTANCE_DIR = os.path.join(BASE_DIR, "instance")
+
+
 def _bool_env(name: str, default: bool = False) -> bool:
     v = os.getenv(name)
     if v is None:
@@ -29,29 +35,74 @@ def _bool_env(name: str, default: bool = False) -> bool:
     return v.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _load_secret_key() -> str:
+    env_key = os.getenv("SECRET_KEY")
+    if env_key:
+        return env_key
+
+    import secrets
+
+    candidate_paths = []
+    if RAILWAY_VOLUME_PATH:
+        candidate_paths.append(os.path.join(RAILWAY_VOLUME_PATH, "secret_key.txt"))
+    candidate_paths.append(os.path.join(INSTANCE_DIR, "secret_key.txt"))
+
+    # Intentar leer un key ya persistido
+    for path in candidate_paths:
+        try:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as fh:
+                    key = fh.read().strip()
+                    if key:
+                        print("🔑 SECRET_KEY cargado desde archivo persistente.")
+                        return key
+        except OSError:
+            print(f"⚠️ No se pudo leer SECRET_KEY en {path}; se intentará con otro destino.")
+
+    # Generar y persistir en el primer destino utilizable
+    key = secrets.token_hex(32)
+    for path in candidate_paths:
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(key)
+            print(
+                "⚠️ SECRET_KEY no está configurado; se generó uno y se guardó en "
+                f"{path}. Usá la variable de entorno SECRET_KEY en producción."
+            )
+            return key
+        except OSError:
+            print(
+                "⚠️ SECRET_KEY no está configurado y no se pudo persistir en "
+                f"{path}. Se intentará otro destino."
+            )
+
+    print(
+        "⚠️ SECRET_KEY no está configurado; se generó uno efímero solo para esta instancia. "
+        "Usá la variable de entorno SECRET_KEY en producción."
+    )
+    return key
+
+
 APP_NAME = "NUR - Notas de Autorización"
 ADMIN_ROLE = "admin"
 DOP_ROLE = "dop"
 OP_ROLE = "operador"
 
-SECRET_KEY = os.getenv("SECRET_KEY")
-if not SECRET_KEY:
-    SECRET_KEY = secrets.token_hex(32)
+SECRET_KEY = _load_secret_key()
 
 WHATSAPP_NUMBER = os.getenv("WHATSAPP_NUMBER", "")
 PUBLIC_WHATSAPP_TEXT = os.getenv(
     "WHATSAPP_TEXT",
-    "Hola, cargué mal una nota en el sistema NUR. ¿Me ayudan a corregirla?"
+    "Hola, cargué mal una nota en el sistema NUR. ¿Me ayudan a corregirla?",
 )
 
 # =========================
 # DATABASE CONFIG - PERSISTENTE
 # =========================
-BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 
 # Configuración para Railway con volumen persistente
 # En Railway, configurá un volumen montado en /data
-RAILWAY_VOLUME_PATH = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "/data")
 DB_URI = os.getenv("DATABASE_URL")
 
 if DB_URI:
@@ -65,11 +116,10 @@ else:
         print(f"📁 Usando base de datos persistente en: {DB_PATH}")
     else:
         # En local
-        INSTANCE_DIR = os.path.join(BASE_DIR, "instance")
         os.makedirs(INSTANCE_DIR, exist_ok=True)
         DB_PATH = os.path.join(INSTANCE_DIR, "nur.db")
         print(f"📁 Usando base de datos local en: {DB_PATH}")
-    
+
     SQLALCHEMY_DATABASE_URI = "sqlite:///" + DB_PATH.replace("\\", "/")
 
 # =========================
@@ -83,6 +133,7 @@ app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
     "pool_pre_ping": True,
     "connect_args": {"check_same_thread": False},
 }
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=8)
 
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
 
@@ -95,6 +146,7 @@ if not _bool_env("FLASK_DEBUG", False):
     )
 
 db = SQLAlchemy(app)
+csrf = CSRFProtect(app)
 login_manager = LoginManager(app)
 login_manager.login_view = "login"
 login_manager.login_message = "Tenés que iniciar sesión."
@@ -109,6 +161,11 @@ def check_rate_limit(ip: str, max_attempts: int = 10, window_minutes: int = 5) -
         return False
     login_attempts[ip].append(now)
     return True
+
+
+def csrf_field() -> Markup:
+    token = generate_csrf()
+    return Markup(f'<input type="hidden" name="csrf_token" value="{token}">')
 
 # =========================
 # Helpers
@@ -150,6 +207,17 @@ def sanitize_text(s: str, max_len: int = 120) -> str:
     s = (s or "").strip()
     s = re.sub(r"\s+", " ", s)
     return s[:max_len]
+
+
+def validate_puesto(raw: str, max_len: int = 50) -> tuple[bool, str]:
+    raw = sanitize_text(raw, max_len=max_len)
+    if not raw:
+        return False, "El puesto es obligatorio."
+    if len(raw) < 2:
+        return False, "El puesto debe tener al menos 2 caracteres."
+    if not re.match(r"^[\w\s\-./]+$", raw):
+        return False, "El puesto solo puede tener letras, números, espacios y -./"
+    return True, raw
 
 
 # =========================
@@ -204,6 +272,11 @@ def load_user(user_id):
     return db.session.get(User, int(user_id))
 
 
+@app.context_processor
+def inject_globals():
+    return {"APP_NAME": APP_NAME, "csrf_token": generate_csrf}
+
+
 # =========================
 # Bootstrap
 # =========================
@@ -211,10 +284,24 @@ def bootstrap_users() -> None:
     if User.query.count() > 0:
         return
 
-    admin_user = os.getenv("ADMIN_USER", "admin")
-    admin_pass = os.getenv("ADMIN_PASS", "AdminSecure2025!")
-    op_user = os.getenv("OP_USER", "PSA")
-    op_pass = os.getenv("OP_PASS", "OpSecure2025!")
+    admin_user = os.getenv("ADMIN_USER")
+    admin_pass = os.getenv("ADMIN_PASS")
+    op_user = os.getenv("OP_USER")
+    op_pass = os.getenv("OP_PASS")
+
+    if not all([admin_user, admin_pass, op_user, op_pass]):
+        import secrets
+
+        admin_user = admin_user or "admin"
+        admin_pass = admin_pass or secrets.token_urlsafe(12)
+        op_user = op_user or "PSA"
+        op_pass = op_pass or secrets.token_urlsafe(12)
+        print(
+            "⚠️ Credenciales iniciales generadas automáticamente (solo para esta instancia). "
+            "Definí ADMIN_USER/ADMIN_PASS/OP_USER/OP_PASS en producción."
+        )
+        print(f"   ADMIN_USER={admin_user} | ADMIN_PASS={admin_pass}")
+        print(f"   OP_USER={op_user} | OP_PASS={op_pass}")
 
     u1 = User(username=admin_user, role=ADMIN_ROLE)
     u1.set_password(admin_pass)
@@ -236,117 +323,8 @@ with app.app_context():
 # TEMPLATES
 # =========================
 
-LOGIN_HTML = r"""
-<!DOCTYPE html>
-<html lang="es">
-<head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Login - NUR</title>
-<style>
-  * { margin:0; padding:0; box-sizing:border-box; }
-  body { 
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    min-height: 100vh;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 20px;
-  }
-  .login-box {
-    max-width: 450px;
-    width: 100%;
-    background: white;
-    padding: 40px;
-    border-radius: 12px;
-    box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-  }
-  h1 {
-    color: #1f2937;
-    margin-bottom: 30px;
-    text-align: center;
-  }
-  .alert {
-    padding: 15px 20px;
-    border-radius: 8px;
-    margin-bottom: 20px;
-    font-weight: 500;
-  }
-  .alert-danger { background: #fee2e2; color: #991b1b; border-left: 4px solid #dc2626; }
-  .alert-success { background: #d1fae5; color: #065f46; border-left: 4px solid #16a34a; }
-  .form-group {
-    margin-bottom: 20px;
-  }
-  label {
-    display: block;
-    font-weight: 600;
-    margin-bottom: 8px;
-    color: #1f2937;
-  }
-  input {
-    width: 100%;
-    padding: 12px;
-    border: 2px solid #e5e7eb;
-    border-radius: 6px;
-    font-size: 14px;
-  }
-  input:focus {
-    outline: none;
-    border-color: #2563eb;
-  }
-  .btn {
-    width: 100%;
-    padding: 12px;
-    background: #2563eb;
-    color: white;
-    border: none;
-    border-radius: 6px;
-    font-size: 14px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.3s;
-  }
-  .btn:hover {
-    background: #1d4ed8;
-    transform: translateY(-2px);
-  }
-  .small-text {
-    font-size: 13px;
-    color: #6b7280;
-    margin-top: 20px;
-    text-align: center;
-  }
-</style>
-</head>
-<body>
-<div class="login-box">
-  <h1>🔐 NUR - Notas de Autorización</h1>
-  
-  {% with messages = get_flashed_messages(with_categories=true) %}
-    {% if messages %}
-      {% for category, message in messages %}
-        <div class="alert alert-{{ category }}">{{ message }}</div>
-      {% endfor %}
-    {% endif %}
-  {% endwith %}
-  
-  <form method="POST">
-    <div class="form-group">
-      <label>Usuario</label>
-      <input type="text" name="username" required autofocus />
-    </div>
-    <div class="form-group">
-      <label>Contraseña</label>
-      <input type="password" name="password" required />
-    </div>
-    <button type="submit" class="btn">Ingresar</button>
-  </form>
-  <p class="small-text">Usá tu usuario y contraseña.</p>
-</div>
-</body>
-</html>
-"""
+
+
 
 
 def render_page(title, content_html, show_admin_nav=False, show_dop_nav=False, show_op_nav=False):
@@ -365,315 +343,18 @@ def render_page(title, content_html, show_admin_nav=False, show_dop_nav=False, s
     elif show_op_nav:
         nav_buttons = f'''
         <a href="{url_for('operador_home')}" class="btn btn-primary">Seleccionar Puesto</a>
-        <a href="{url_for('operador_reportar_inicio')}" class="btn btn-warning">🚨 Reportar ERROR</a>
+        <a href="{url_for('operador_reportar_inicio')}" class="btn btn-warning">Reportar ERROR</a>
         '''
-    
-    return f"""
-<!DOCTYPE html>
-<html lang="es">
-<head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>{title}</title>
-<style>
-  :root {{
-    --primary: #2563eb;
-    --success: #16a34a;
-    --danger: #dc2626;
-    --warning: #f59e0b;
-    --dark: #1f2937;
-  }}
-  * {{ margin:0; padding:0; box-sizing:border-box; }}
-  body {{ 
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    min-height: 100vh;
-    padding: 20px;
-  }}
-  .container {{
-    max-width: 1400px;
-    margin: 0 auto;
-    background: white;
-    border-radius: 12px;
-    box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-    overflow: hidden;
-  }}
-  .header {{
-    background: linear-gradient(135deg, #1f2937 0%, #111827 100%);
-    color: white;
-    padding: 20px 30px;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 15px;
-  }}
-  .header h1 {{
-    font-size: 24px;
-    font-weight: 700;
-  }}
-  .header-actions {{
-    display: flex;
-    gap: 10px;
-    align-items: center;
-  }}
-  .btn {{
-    padding: 10px 20px;
-    border: none;
-    border-radius: 6px;
-    cursor: pointer;
-    font-size: 14px;
-    font-weight: 600;
-    text-decoration: none;
-    display: inline-block;
-    transition: all 0.3s;
-  }}
-  .btn-primary {{ background: var(--primary); color: white; }}
-  .btn-primary:hover {{ background: #1d4ed8; transform: translateY(-2px); }}
-  .btn-success {{ background: var(--success); color: white; }}
-  .btn-success:hover {{ background: #15803d; }}
-  .btn-danger {{ background: var(--danger); color: white; }}
-  .btn-danger:hover {{ background: #b91c1c; }}
-  .btn-warning {{ background: var(--warning); color: white; }}
-  .btn-warning:hover {{ background: #d97706; }}
-  .btn-secondary {{ background: #6b7280; color: white; }}
-  .btn-secondary:hover {{ background: #4b5563; }}
-  
-  .content {{ padding: 30px; }}
-  
-  .alert {{
-    padding: 15px 20px;
-    border-radius: 8px;
-    margin-bottom: 20px;
-    font-weight: 500;
-  }}
-  .alert-success {{ background: #d1fae5; color: #065f46; border-left: 4px solid var(--success); }}
-  .alert-danger {{ background: #fee2e2; color: #991b1b; border-left: 4px solid var(--danger); }}
-  .alert-warning {{ background: #fef3c7; color: #92400e; border-left: 4px solid var(--warning); }}
-  
-  .form-group {{
-    margin-bottom: 20px;
-  }}
-  .form-group label {{
-    display: block;
-    font-weight: 600;
-    margin-bottom: 8px;
-    color: var(--dark);
-  }}
-  .form-group input, .form-group select, .form-group textarea {{
-    width: 100%;
-    padding: 12px;
-    border: 2px solid #e5e7eb;
-    border-radius: 6px;
-    font-size: 14px;
-    transition: border-color 0.3s;
-  }}
-  .form-group input:focus, .form-group select:focus, .form-group textarea:focus {{
-    outline: none;
-    border-color: var(--primary);
-  }}
-  
-  table {{
-    width: 100%;
-    border-collapse: collapse;
-    margin-top: 20px;
-    background: white;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-    border-radius: 8px;
-    overflow: hidden;
-  }}
-  thead {{
-    background: linear-gradient(135deg, #1f2937 0%, #111827 100%);
-    color: white;
-  }}
-  th, td {{
-    padding: 15px;
-    text-align: left;
-    border-bottom: 1px solid #e5e7eb;
-  }}
-  tbody tr:hover {{
-    background: #f9fafb;
-  }}
-  
-  .badge {{
-    padding: 6px 12px;
-    border-radius: 20px;
-    font-size: 12px;
-    font-weight: 700;
-    display: inline-block;
-  }}
-  .badge-pending {{ background: #fef3c7; color: #92400e; }}
-  .badge-completed {{ background: #d1fae5; color: #065f46; }}
-  .badge-open {{ background: #fee2e2; color: #991b1b; }}
-  .badge-closed {{ background: #e0e7ff; color: #3730a3; }}
-  
-  .panel {{
-    background: white;
-    border-radius: 8px;
-    padding: 25px;
-    margin-bottom: 25px;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-  }}
-  
-  .panel-highlight {{
-    background: linear-gradient(135deg, #7c3aed 0%, #5b21b6 100%);
-    color: white;
-    border: 3px solid #fbbf24;
-    box-shadow: 0 8px 20px rgba(124,58,237,0.4);
-    animation: pulse 2s infinite;
-  }}
-  
-  @keyframes pulse {{
-    0%, 100% {{ box-shadow: 0 8px 20px rgba(124,58,237,0.4); }}
-    50% {{ box-shadow: 0 12px 30px rgba(124,58,237,0.6); }}
-  }}
-  
-  .panel-highlight h2 {{
-    color: white;
-    font-size: 22px;
-    margin-bottom: 15px;
-    text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
-  }}
-  
-  .panel-highlight label {{
-    color: white !important;
-  }}
-  
-  .panel h2 {{
-    color: var(--dark);
-    font-size: 20px;
-    margin-bottom: 20px;
-    border-bottom: 3px solid var(--primary);
-    padding-bottom: 10px;
-  }}
-  
-  .grid {{
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-    gap: 20px;
-  }}
-  
-  .small-text {{
-    font-size: 13px;
-    color: #6b7280;
-    margin-top: 5px;
-  }}
-  
-  /* MODAL STYLES */
-  .modal {{
-    display: none;
-    position: fixed;
-    z-index: 1000;
-    left: 0;
-    top: 0;
-    width: 100%;
-    height: 100%;
-    background-color: rgba(0,0,0,0.7);
-    overflow: auto;
-  }}
-  
-  .modal-content {{
-    background-color: white;
-    margin: 5% auto;
-    padding: 0;
-    border-radius: 12px;
-    width: 90%;
-    max-width: 800px;
-    box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-    animation: slideDown 0.3s ease;
-  }}
-  
-  @keyframes slideDown {{
-    from {{ transform: translateY(-50px); opacity: 0; }}
-    to {{ transform: translateY(0); opacity: 1; }}
-  }}
-  
-  .modal-header {{
-    background: linear-gradient(135deg, #1f2937 0%, #111827 100%);
-    color: white;
-    padding: 20px 30px;
-    border-radius: 12px 12px 0 0;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-  }}
-  
-  .modal-header h2 {{
-    margin: 0;
-    font-size: 20px;
-  }}
-  
-  .close {{
-    color: white;
-    font-size: 35px;
-    font-weight: bold;
-    cursor: pointer;
-    line-height: 20px;
-  }}
-  
-  .close:hover {{
-    color: #f59e0b;
-  }}
-  
-  .modal-body {{
-    padding: 30px;
-    max-height: 70vh;
-    overflow-y: auto;
-  }}
-  
-  .modal-field {{
-    margin-bottom: 20px;
-    padding-bottom: 15px;
-    border-bottom: 1px solid #e5e7eb;
-  }}
-  
-  .modal-field:last-child {{
-    border-bottom: none;
-  }}
-  
-  .modal-field-label {{
-    font-weight: 700;
-    color: #6b7280;
-    font-size: 13px;
-    text-transform: uppercase;
-    margin-bottom: 8px;
-  }}
-  
-  .modal-field-value {{
-    color: #1f2937;
-    font-size: 15px;
-    line-height: 1.6;
-    white-space: pre-wrap;
-    word-wrap: break-word;
-  }}
-</style>
-</head>
-<body>
-<div class="container">
-  <div class="header">
-    <h1>NUR - Notas de Autorización</h1>
-    <div class="header-actions">
-      <span style="margin-right:15px;">👤 {current_user.username} ({current_user.role.upper()})</span>
-      {nav_buttons}
-      <a href="{url_for('logout')}" class="btn btn-danger">Salir</a>
-    </div>
-  </div>
-  <div class="content">
-    {{% with messages = get_flashed_messages(with_categories=true) %}}
-      {{% if messages %}}
-        {{% for category, message in messages %}}
-          <div class="alert alert-{{{{ category }}}}">{{{{ message }}}}</div>
-        {{% endfor %}}
-      {{% endif %}}
-    {{% endwith %}}
-    {content_html}
-  </div>
-</div>
-</body>
-</html>
-"""
+
+    return render_template(
+        "base.html",
+        title=title,
+        nav_buttons=Markup(nav_buttons),
+        content_html=Markup(content_html),
+    )
 
 # Continuaré con las rutas en el siguiente mensaje...
+
 # =========================
 # Routes
 # =========================
@@ -711,6 +392,8 @@ def login():
         
         user = User.query.filter_by(username=username).first()
         if user and user.check_password(password):
+            session.clear()
+            session.permanent = True
             login_user(user)
             flash("Bienvenido!", "success")
             
@@ -723,7 +406,7 @@ def login():
         else:
             flash("Usuario o contraseña incorrectos.", "danger")
     
-    return render_template_string(LOGIN_HTML)
+    return render_template('login.html')
 
 
 @app.route("/logout")
@@ -767,6 +450,7 @@ def admin_home():
     <strong>Importante:</strong> Creá una fila por cada puesto. Si el mismo N° va a 5 puestos, creás 5 notas (una por puesto).
   </p>
   <form method="POST" action="{url_for('admin_crear_nota')}">
+    {csrf_field()}
     <div class="grid">
       <div class="form-group">
         <label>N° Nota</label>
@@ -851,6 +535,7 @@ def admin_home():
         <td>
           <form method="POST" action="{url_for('admin_borrar_nota', nota_id=n.id)}" style="display:inline;"
                 onsubmit="return confirm('¿Borrar nota #{n.id}?');">
+            {csrf_field()}
             <button type="submit" class="btn btn-danger" style="padding:6px 12px; font-size:12px;">🗑️ Borrar</button>
           </form>
         </td>
@@ -864,7 +549,7 @@ def admin_home():
 </div>
 """
     
-    return render_template_string(render_page("Admin - NUR", content, show_admin_nav=True))
+    return render_page("Admin - NUR", content, show_admin_nav=True)
 
 
 @app.route("/admin/crear_nota", methods=["POST"])
@@ -872,10 +557,13 @@ def admin_home():
 @role_required(ADMIN_ROLE)
 def admin_crear_nota():
     try:
-        nro_nota = sanitize_text(request.form.get("nro_nota", ""))
-        autoriza = sanitize_text(request.form.get("autoriza", ""))
-        puesto = sanitize_text(request.form.get("puesto", ""))
-        
+        nro_nota = sanitize_text(request.form.get("nro_nota", ""), max_len=50)
+        autoriza = sanitize_text(request.form.get("autoriza", ""), max_len=10)
+        ok_puesto, puesto = validate_puesto(request.form.get("puesto", ""))
+        if not ok_puesto:
+            flash(puesto, "danger")
+            return redirect(url_for("admin_home"))
+
         if not nro_nota or not autoriza or not puesto:
             flash("Todos los campos son obligatorios.", "danger")
             return redirect(url_for("admin_home"))
@@ -996,8 +684,9 @@ def admin_usuarios():
   <p style="margin-bottom:20px;">
     Creá usuarios con diferentes roles: <strong>Admin</strong> (control total), <strong>DOP</strong> (carga notas y ve todo, sin borrar), <strong>Operador</strong> (completa notas).
   </p>
-  
+
   <form method="POST" action="{url_for('admin_crear_usuario')}" style="margin-bottom:30px;">
+    {csrf_field()}
     <div class="grid">
       <div class="form-group">
         <label>Nombre de usuario</label>
@@ -1038,6 +727,7 @@ def admin_usuarios():
         <td>
           <form method="POST" action="{url_for('admin_borrar_usuario', user_id=u.id)}" style="display:inline;"
                 onsubmit="return confirm('¿Borrar usuario {u.username}?');">
+            {csrf_field()}
             <button type="submit" class="btn btn-danger" style="padding:6px 12px; font-size:12px;">🗑️ Borrar</button>
           </form>
         </td>
@@ -1050,7 +740,7 @@ def admin_usuarios():
 </div>
 """
     
-    return render_template_string(render_page("Usuarios - Admin", content, show_admin_nav=True))
+    return render_page("Usuarios - Admin", content, show_admin_nav=True)
 
 
 @app.route("/admin/crear_usuario", methods=["POST"])
@@ -1138,7 +828,14 @@ def admin_errores():
     
     for e in errores:
         estado_badge = '<span class="badge badge-open">ABIERTO</span>' if e.estado == 'ABIERTO' else '<span class="badge badge-closed">CERRADO</span>'
-        cerrar_btn = f'<form method="POST" action="{url_for("admin_cerrar_error", err_id=e.id)}" style="display:inline;"><button type="submit" class="btn btn-success" style="padding:6px 12px; font-size:12px;">✅ Cerrar</button></form>' if e.estado == 'ABIERTO' else ''
+        cerrar_btn = ""
+        if e.estado == "ABIERTO":
+            cerrar_btn = (
+                f'<form method="POST" action="{url_for("admin_cerrar_error", err_id=e.id)}" style="display:inline;">'
+                f"{csrf_field()}"
+                f'<button type="submit" class="btn btn-success" style="padding:6px 12px; font-size:12px;">✅ Cerrar</button>'
+                f"</form>"
+            )
         
         # Escapar HTML para el modal
         detalle_escapado = e.detalle.replace("'", "\\'").replace('"', '&quot;').replace('\n', '\\n')
@@ -1157,6 +854,7 @@ def admin_errores():
           {cerrar_btn}
           <form method="POST" action="{url_for('admin_borrar_error', err_id=e.id)}" style="display:inline;"
                 onsubmit="return confirm('¿Borrar reporte #{e.id}?');">
+            {csrf_field()}
             <button type="submit" class="btn btn-danger" style="padding:6px 12px; font-size:12px;">🗑️ Borrar</button>
           </form>
         </td>
@@ -1242,7 +940,7 @@ document.addEventListener('keydown', function(event) {
 </script>
 """
     
-    return render_template_string(render_page("Errores - Admin", content, show_admin_nav=True))
+    return render_page("Errores - Admin", content, show_admin_nav=True)
 
 
 @app.route("/admin/errores/cerrar/<int:err_id>", methods=["POST"])
@@ -1318,6 +1016,7 @@ def dop_home():
     <strong>Importante:</strong> Creá una fila por cada puesto. Si el mismo N° va a 5 puestos, creás 5 notas (una por puesto).
   </p>
   <form method="POST" action="{url_for('dop_crear_nota')}">
+    {csrf_field()}
     <div class="grid">
       <div class="form-group">
         <label>N° Nota</label>
@@ -1408,7 +1107,7 @@ def dop_home():
 </div>
 """
     
-    return render_template_string(render_page("DOP - NUR", content, show_dop_nav=True))
+    return render_page("DOP - NUR", content, show_dop_nav=True)
 
 
 @app.route("/dop/crear_nota", methods=["POST"])
@@ -1416,10 +1115,13 @@ def dop_home():
 @role_required(DOP_ROLE)
 def dop_crear_nota():
     try:
-        nro_nota = sanitize_text(request.form.get("nro_nota", ""))
-        autoriza = sanitize_text(request.form.get("autoriza", ""))
-        puesto = sanitize_text(request.form.get("puesto", ""))
-        
+        nro_nota = sanitize_text(request.form.get("nro_nota", ""), max_len=50)
+        autoriza = sanitize_text(request.form.get("autoriza", ""), max_len=10)
+        ok_puesto, puesto = validate_puesto(request.form.get("puesto", ""))
+        if not ok_puesto:
+            flash(puesto, "danger")
+            return redirect(url_for("dop_home"))
+
         if not nro_nota or not autoriza or not puesto:
             flash("Todos los campos son obligatorios.", "danger")
             return redirect(url_for("dop_home"))
@@ -1637,7 +1339,7 @@ document.addEventListener('keydown', function(event) {
 </script>
 """
     
-    return render_template_string(render_page("Errores - DOP", content, show_dop_nav=True))
+    return render_page("Errores - DOP", content, show_dop_nav=True)
 
 
 # =========================
@@ -1682,13 +1384,18 @@ function irPuesto() {{
 </script>
 """
     
-    return render_template_string(render_page("Operador - NUR", content, show_op_nav=True))
+    return render_page("Operador - NUR", content, show_op_nav=True)
 
 
 @app.route("/operador/puesto/<puesto>")
 @login_required
 @role_required(OP_ROLE)
 def operador_puesto(puesto: str):
+    ok_puesto, puesto = validate_puesto(puesto)
+    if not ok_puesto:
+        flash(puesto, "danger")
+        return redirect(url_for("operador_home"))
+
     notas = Nota.query.filter_by(puesto=puesto, estado="PENDIENTE").order_by(Nota.id).all()
     
     session_key = f"defaults_{puesto}"
@@ -1708,6 +1415,7 @@ def operador_puesto(puesto: str):
 <div class="panel">
   <h2>💾 Datos de Sesión (se borran al salir)</h2>
   <form method="POST" action="{url_for('operador_guardar_defaults')}">
+    {csrf_field()}
     <input type="hidden" name="puesto" value="{puesto}" />
     <div class="grid">
       <div class="form-group">
@@ -1772,7 +1480,7 @@ def operador_puesto(puesto: str):
     
     content += f'<a href="{url_for("operador_home")}" class="btn btn-secondary">← Volver a selección de puesto</a>'
     
-    return render_template_string(render_page(f"Puesto {puesto} - Operador", content, show_op_nav=True))
+    return render_page(f"Puesto {puesto} - Operador", content, show_op_nav=True)
 
 
 @app.route("/operador/guardar_defaults", methods=["POST"])
@@ -1780,9 +1488,9 @@ def operador_puesto(puesto: str):
 @role_required(OP_ROLE)
 def operador_guardar_defaults():
     try:
-        puesto = request.form.get("puesto", "").strip()
-        if not puesto:
-            flash("Puesto no especificado.", "danger")
+        ok_puesto, puesto = validate_puesto(request.form.get("puesto", ""))
+        if not ok_puesto:
+            flash(puesto, "danger")
             return redirect(url_for("operador_home"))
         
         session_key = f"defaults_{puesto}"
@@ -1873,6 +1581,7 @@ def operador_completar_nota(nota_id: int):
 
 <div class="panel">
   <form method="POST">
+    {csrf_field()}
     <div class="grid">
       <div class="form-group">
         <label>Entrega - Nombre</label>
@@ -1905,7 +1614,7 @@ def operador_completar_nota(nota_id: int):
 </div>
 """
     
-    return render_template_string(render_page(f"Completar Nota #{nota_id}", content, show_op_nav=True))
+    return render_page(f"Completar Nota #{nota_id}", content, show_op_nav=True)
 
 
 @app.route("/operador/reportar_inicio")
@@ -1940,6 +1649,7 @@ def operador_reportar_inicio():
 
 <div class="panel">
   <form method="POST" action="{url_for('operador_reportar')}">
+    {csrf_field()}
     <div class="grid">
       <div class="form-group">
         <label>N° de Nota (seleccioná o escribí)</label>
@@ -1983,7 +1693,7 @@ input[list] {{
 </style>
 """
     
-    return render_template_string(render_page("Reportar Error", content, show_op_nav=True))
+    return render_page("Reportar Error", content, show_op_nav=True)
 
 
 @app.route("/operador/reportar", methods=["POST"])
@@ -1991,8 +1701,14 @@ input[list] {{
 @role_required(OP_ROLE)
 def operador_reportar():
     try:
-        nro_nota = sanitize_text(request.form.get("nro_nota", ""))
-        puesto = sanitize_text(request.form.get("puesto", ""))
+        nro_nota = sanitize_text(request.form.get("nro_nota", ""), max_len=50)
+        raw_puesto = request.form.get("puesto", "")
+        puesto = ""
+        if raw_puesto:
+            ok_puesto, puesto = validate_puesto(raw_puesto)
+            if not ok_puesto:
+                flash(puesto, "danger")
+                return redirect(url_for("operador_reportar_inicio"))
         detalle = sanitize_text(request.form.get("detalle", ""), max_len=1000)
         
         if not detalle:
