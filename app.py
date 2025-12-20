@@ -31,7 +31,7 @@ def _bool_env(name: str, default: bool = False) -> bool:
 
 APP_NAME = "NUR - Notas de Autorización"
 ADMIN_ROLE = "admin"
-DOP_ROLE = "dop"  # Director de Operaciones - nuevo rol
+DOP_ROLE = "dop"
 OP_ROLE = "operador"
 
 SECRET_KEY = os.getenv("SECRET_KEY")
@@ -44,15 +44,32 @@ PUBLIC_WHATSAPP_TEXT = os.getenv(
     "Hola, cargué mal una nota en el sistema NUR. ¿Me ayudan a corregirla?"
 )
 
+# =========================
+# DATABASE CONFIG - PERSISTENTE
+# =========================
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-INSTANCE_DIR = os.path.join(BASE_DIR, "instance")
-os.makedirs(INSTANCE_DIR, exist_ok=True)
-DB_PATH = os.getenv("NUR_DB_PATH", os.path.join(INSTANCE_DIR, "nur.db"))
+
+# Configuración para Railway con volumen persistente
+# En Railway, configurá un volumen montado en /data
+RAILWAY_VOLUME_PATH = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "/data")
 DB_URI = os.getenv("DATABASE_URL")
 
 if DB_URI:
+    # Si hay DATABASE_URL (ej: PostgreSQL), usarla
     SQLALCHEMY_DATABASE_URI = DB_URI
 else:
+    # SQLite con persistencia
+    if os.path.exists(RAILWAY_VOLUME_PATH):
+        # En Railway con volumen
+        DB_PATH = os.path.join(RAILWAY_VOLUME_PATH, "nur.db")
+        print(f"📁 Usando base de datos persistente en: {DB_PATH}")
+    else:
+        # En local
+        INSTANCE_DIR = os.path.join(BASE_DIR, "instance")
+        os.makedirs(INSTANCE_DIR, exist_ok=True)
+        DB_PATH = os.path.join(INSTANCE_DIR, "nur.db")
+        print(f"📁 Usando base de datos local en: {DB_PATH}")
+    
     SQLALCHEMY_DATABASE_URI = "sqlite:///" + DB_PATH.replace("\\", "/")
 
 # =========================
@@ -211,6 +228,8 @@ def bootstrap_users() -> None:
 with app.app_context():
     db.create_all()
     bootstrap_users()
+    print(f"✅ Base de datos inicializada correctamente")
+    print(f"📊 Usuarios: {User.query.count()} | Notas: {Nota.query.count()} | Errores: {ErrorReporte.query.count()}")
 
 
 # =========================
@@ -539,6 +558,94 @@ def render_page(title, content_html, show_admin_nav=False, show_dop_nav=False, s
     color: #6b7280;
     margin-top: 5px;
   }}
+  
+  /* MODAL STYLES */
+  .modal {{
+    display: none;
+    position: fixed;
+    z-index: 1000;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0,0,0,0.7);
+    overflow: auto;
+  }}
+  
+  .modal-content {{
+    background-color: white;
+    margin: 5% auto;
+    padding: 0;
+    border-radius: 12px;
+    width: 90%;
+    max-width: 800px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+    animation: slideDown 0.3s ease;
+  }}
+  
+  @keyframes slideDown {{
+    from {{ transform: translateY(-50px); opacity: 0; }}
+    to {{ transform: translateY(0); opacity: 1; }}
+  }}
+  
+  .modal-header {{
+    background: linear-gradient(135deg, #1f2937 0%, #111827 100%);
+    color: white;
+    padding: 20px 30px;
+    border-radius: 12px 12px 0 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }}
+  
+  .modal-header h2 {{
+    margin: 0;
+    font-size: 20px;
+  }}
+  
+  .close {{
+    color: white;
+    font-size: 35px;
+    font-weight: bold;
+    cursor: pointer;
+    line-height: 20px;
+  }}
+  
+  .close:hover {{
+    color: #f59e0b;
+  }}
+  
+  .modal-body {{
+    padding: 30px;
+    max-height: 70vh;
+    overflow-y: auto;
+  }}
+  
+  .modal-field {{
+    margin-bottom: 20px;
+    padding-bottom: 15px;
+    border-bottom: 1px solid #e5e7eb;
+  }}
+  
+  .modal-field:last-child {{
+    border-bottom: none;
+  }}
+  
+  .modal-field-label {{
+    font-weight: 700;
+    color: #6b7280;
+    font-size: 13px;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }}
+  
+  .modal-field-value {{
+    color: #1f2937;
+    font-size: 15px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+  }}
 </style>
 </head>
 <body>
@@ -566,6 +673,7 @@ def render_page(title, content_html, show_admin_nav=False, show_dop_nav=False, s
 </html>
 """
 
+# Continuaré con las rutas en el siguiente mensaje...
 # =========================
 # Routes
 # =========================
@@ -628,7 +736,7 @@ def logout():
 
 
 # =========================
-# Admin Routes (sin cambios, solo agrega DOP al crear usuarios)
+# Admin Routes
 # =========================
 
 @app.route("/admin")
@@ -1005,6 +1113,7 @@ def admin_borrar_usuario(user_id: int):
 @login_required
 @role_required(ADMIN_ROLE)
 def admin_errores():
+    """Panel de errores con modal para ver detalle completo"""
     errores = ErrorReporte.query.order_by(ErrorReporte.creado_en.desc()).limit(200).all()
     
     content = f"""
@@ -1018,7 +1127,7 @@ def admin_errores():
         <th>N° Nota</th>
         <th>Puesto</th>
         <th>Reportado por</th>
-        <th>Detalle</th>
+        <th>Detalle (resumen)</th>
         <th>Fecha</th>
         <th>Estado</th>
         <th>Acciones</th>
@@ -1031,16 +1140,20 @@ def admin_errores():
         estado_badge = '<span class="badge badge-open">ABIERTO</span>' if e.estado == 'ABIERTO' else '<span class="badge badge-closed">CERRADO</span>'
         cerrar_btn = f'<form method="POST" action="{url_for("admin_cerrar_error", err_id=e.id)}" style="display:inline;"><button type="submit" class="btn btn-success" style="padding:6px 12px; font-size:12px;">✅ Cerrar</button></form>' if e.estado == 'ABIERTO' else ''
         
+        # Escapar HTML para el modal
+        detalle_escapado = e.detalle.replace("'", "\\'").replace('"', '&quot;').replace('\n', '\\n')
+        
         content += f"""
       <tr>
         <td>{e.id}</td>
-        <td>{e.nro_nota or ''}</td>
-        <td>{e.puesto or ''}</td>
+        <td>{e.nro_nota or '-'}</td>
+        <td>{e.puesto or '-'}</td>
         <td>{e.reportado_por}</td>
-        <td>{e.detalle[:100]}...</td>
+        <td>{e.detalle[:50]}...</td>
         <td>{e.creado_en.strftime('%d/%m %H:%M')}</td>
         <td>{estado_badge}</td>
         <td>
+          <button onclick="openModal({e.id}, '{e.nro_nota or '-'}', '{e.puesto or '-'}', '{e.reportado_por}', '{detalle_escapado}', '{e.creado_en.strftime('%d/%m/%Y %H:%M')}', '{e.estado}')" class="btn btn-primary" style="padding:6px 12px; font-size:12px;">👁️ Ver</button>
           {cerrar_btn}
           <form method="POST" action="{url_for('admin_borrar_error', err_id=e.id)}" style="display:inline;"
                 onsubmit="return confirm('¿Borrar reporte #{e.id}?');">
@@ -1055,6 +1168,78 @@ def admin_errores():
   </table>
   <p class="small-text" style="margin-top:15px;">Mostrando hasta 200 registros.</p>
 </div>
+
+<!-- Modal -->
+<div id="errorModal" class="modal">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h2>📋 Detalle del Reporte de Error</h2>
+      <span class="close" onclick="closeModal()">&times;</span>
+    </div>
+    <div class="modal-body">
+      <div class="modal-field">
+        <div class="modal-field-label">ID del Reporte</div>
+        <div class="modal-field-value" id="modal-id"></div>
+      </div>
+      <div class="modal-field">
+        <div class="modal-field-label">N° de Nota</div>
+        <div class="modal-field-value" id="modal-nro-nota"></div>
+      </div>
+      <div class="modal-field">
+        <div class="modal-field-label">Puesto</div>
+        <div class="modal-field-value" id="modal-puesto"></div>
+      </div>
+      <div class="modal-field">
+        <div class="modal-field-label">Reportado por</div>
+        <div class="modal-field-value" id="modal-reportado"></div>
+      </div>
+      <div class="modal-field">
+        <div class="modal-field-label">Fecha y Hora</div>
+        <div class="modal-field-value" id="modal-fecha"></div>
+      </div>
+      <div class="modal-field">
+        <div class="modal-field-label">Estado</div>
+        <div class="modal-field-value" id="modal-estado"></div>
+      </div>
+      <div class="modal-field">
+        <div class="modal-field-label">Detalle Completo del Problema</div>
+        <div class="modal-field-value" id="modal-detalle" style="background:#f9fafb; padding:15px; border-radius:6px; border-left:4px solid #2563eb;"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+function openModal(id, nroNota, puesto, reportado, detalle, fecha, estado) {
+  document.getElementById('modal-id').textContent = '#' + id;
+  document.getElementById('modal-nro-nota').textContent = nroNota;
+  document.getElementById('modal-puesto').textContent = puesto;
+  document.getElementById('modal-reportado').textContent = reportado;
+  document.getElementById('modal-fecha').textContent = fecha;
+  document.getElementById('modal-estado').innerHTML = estado === 'ABIERTO' 
+    ? '<span class="badge badge-open">ABIERTO</span>' 
+    : '<span class="badge badge-closed">CERRADO</span>';
+  document.getElementById('modal-detalle').textContent = detalle;
+  document.getElementById('errorModal').style.display = 'block';
+}
+
+function closeModal() {
+  document.getElementById('errorModal').style.display = 'none';
+}
+
+window.onclick = function(event) {
+  const modal = document.getElementById('errorModal');
+  if (event.target == modal) {
+    closeModal();
+  }
+}
+
+document.addEventListener('keydown', function(event) {
+  if (event.key === 'Escape') {
+    closeModal();
+  }
+});
+</script>
 """
     
     return render_template_string(render_page("Errores - Admin", content, show_admin_nav=True))
@@ -1099,6 +1284,7 @@ def admin_borrar_error(err_id: int):
     return redirect(url_for("admin_errores"))
 
 
+# Continúa con DOP y Operador en el siguiente mensaje...
 # =========================
 # DOP Routes (Director de Operaciones)
 # =========================
@@ -1327,7 +1513,7 @@ def dop_exportar_csv():
 @login_required
 @role_required(DOP_ROLE)
 def dop_errores():
-    """Panel de errores para DOP - solo lectura"""
+    """Panel de errores para DOP - solo lectura con modal"""
     errores = ErrorReporte.query.order_by(ErrorReporte.creado_en.desc()).limit(200).all()
     
     content = f"""
@@ -1344,9 +1530,10 @@ def dop_errores():
         <th>N° Nota</th>
         <th>Puesto</th>
         <th>Reportado por</th>
-        <th>Detalle</th>
+        <th>Detalle (resumen)</th>
         <th>Fecha</th>
         <th>Estado</th>
+        <th>Acciones</th>
       </tr>
     </thead>
     <tbody>
@@ -1354,16 +1541,20 @@ def dop_errores():
     
     for e in errores:
         estado_badge = '<span class="badge badge-open">ABIERTO</span>' if e.estado == 'ABIERTO' else '<span class="badge badge-closed">CERRADO</span>'
+        detalle_escapado = e.detalle.replace("'", "\\'").replace('"', '&quot;').replace('\n', '\\n')
         
         content += f"""
       <tr>
         <td>{e.id}</td>
-        <td>{e.nro_nota or ''}</td>
-        <td>{e.puesto or ''}</td>
+        <td>{e.nro_nota or '-'}</td>
+        <td>{e.puesto or '-'}</td>
         <td>{e.reportado_por}</td>
-        <td>{e.detalle[:100]}...</td>
+        <td>{e.detalle[:50]}...</td>
         <td>{e.creado_en.strftime('%d/%m %H:%M')}</td>
         <td>{estado_badge}</td>
+        <td>
+          <button onclick="openModal({e.id}, '{e.nro_nota or '-'}', '{e.puesto or '-'}', '{e.reportado_por}', '{detalle_escapado}', '{e.creado_en.strftime('%d/%m/%Y %H:%M')}', '{e.estado}')" class="btn btn-primary" style="padding:6px 12px; font-size:12px;">👁️ Ver</button>
+        </td>
       </tr>
 """
     
@@ -1372,12 +1563,85 @@ def dop_errores():
   </table>
   <p class="small-text" style="margin-top:15px;">Mostrando hasta 200 registros.</p>
 </div>
+
+<!-- Modal -->
+<div id="errorModal" class="modal">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h2>📋 Detalle del Reporte de Error</h2>
+      <span class="close" onclick="closeModal()">&times;</span>
+    </div>
+    <div class="modal-body">
+      <div class="modal-field">
+        <div class="modal-field-label">ID del Reporte</div>
+        <div class="modal-field-value" id="modal-id"></div>
+      </div>
+      <div class="modal-field">
+        <div class="modal-field-label">N° de Nota</div>
+        <div class="modal-field-value" id="modal-nro-nota"></div>
+      </div>
+      <div class="modal-field">
+        <div class="modal-field-label">Puesto</div>
+        <div class="modal-field-value" id="modal-puesto"></div>
+      </div>
+      <div class="modal-field">
+        <div class="modal-field-label">Reportado por</div>
+        <div class="modal-field-value" id="modal-reportado"></div>
+      </div>
+      <div class="modal-field">
+        <div class="modal-field-label">Fecha y Hora</div>
+        <div class="modal-field-value" id="modal-fecha"></div>
+      </div>
+      <div class="modal-field">
+        <div class="modal-field-label">Estado</div>
+        <div class="modal-field-value" id="modal-estado"></div>
+      </div>
+      <div class="modal-field">
+        <div class="modal-field-label">Detalle Completo del Problema</div>
+        <div class="modal-field-value" id="modal-detalle" style="background:#f9fafb; padding:15px; border-radius:6px; border-left:4px solid #2563eb;"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+function openModal(id, nroNota, puesto, reportado, detalle, fecha, estado) {
+  document.getElementById('modal-id').textContent = '#' + id;
+  document.getElementById('modal-nro-nota').textContent = nroNota;
+  document.getElementById('modal-puesto').textContent = puesto;
+  document.getElementById('modal-reportado').textContent = reportado;
+  document.getElementById('modal-fecha').textContent = fecha;
+  document.getElementById('modal-estado').innerHTML = estado === 'ABIERTO' 
+    ? '<span class="badge badge-open">ABIERTO</span>' 
+    : '<span class="badge badge-closed">CERRADO</span>';
+  document.getElementById('modal-detalle').textContent = detalle;
+  document.getElementById('errorModal').style.display = 'block';
+}
+
+function closeModal() {
+  document.getElementById('errorModal').style.display = 'none';
+}
+
+window.onclick = function(event) {
+  const modal = document.getElementById('errorModal');
+  if (event.target == modal) {
+    closeModal();
+  }
+}
+
+document.addEventListener('keydown', function(event) {
+  if (event.key === 'Escape') {
+    closeModal();
+  }
+});
+</script>
 """
     
     return render_template_string(render_page("Errores - DOP", content, show_dop_nav=True))
 
+
 # =========================
-# Operador Routes (con formulario de errores mejorado)
+# Operador Routes
 # =========================
 
 @app.route("/operador")
@@ -1650,14 +1914,11 @@ def operador_completar_nota(nota_id: int):
 def operador_reportar_inicio():
     """Formulario mejorado para reportar errores con selección de N° de Nota y Puesto"""
     
-    # Obtener todas las notas recientes (últimas 100) para seleccionar
     notas_recientes = Nota.query.order_by(Nota.id.desc()).limit(100).all()
     
-    # Obtener notas únicas
     nros_nota = sorted(set([n.nro_nota for n in notas_recientes]))
     puestos = sorted(set([n.puesto for n in notas_recientes]))
     
-    # Crear options para los selects
     nro_options = "".join([f'<option value="{nro}">{nro}</option>' for nro in nros_nota])
     puesto_options = "".join([f'<option value="{p}">{p}</option>' for p in puestos])
     
@@ -1738,7 +1999,6 @@ def operador_reportar():
             flash("El detalle es obligatorio.", "danger")
             return redirect(url_for("operador_reportar_inicio"))
         
-        # Intentar encontrar la nota correspondiente
         nota = None
         if nro_nota and puesto:
             nota = Nota.query.filter_by(nro_nota=nro_nota, puesto=puesto).first()
@@ -1789,4 +2049,3 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     debug = _bool_env("FLASK_DEBUG", False)
     app.run(host="0.0.0.0", port=port, debug=debug)
-
