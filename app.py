@@ -1911,40 +1911,34 @@ def operador_completar_nota(nota_id: int):
 <div class="panel">
   <form method="POST" class="stacked-form">
     {csrf_field()}
-    <div class="form-row">
-      <div class="form-group">
-        <label>Entrega - Nombre y Apellido</label>
-        <input type="text" name="entrega_nombre" class="{_err(entrega_nombre_err)}" value="{pre.get('entrega_nombre', '')}" required placeholder="Nombre y Apellido" />
-        {f'<p class="error-text">{entrega_nombre_err}</p>' if entrega_nombre_err else ''}
-      </div>
-      <div class="form-group">
-        <label>Entrega - Legajo</label>
-        <input type="text" name="entrega_legajo" class="{_err(entrega_legajo_err)}" value="{pre.get('entrega_legajo', '')}" required placeholder="Ej: 501123" />
-        {f'<p class="error-text">{entrega_legajo_err}</p>' if entrega_legajo_err else '<p class="small-text">Usá solo números (501000 - 512000).</p>'}
-      </div>
+    <div class="form-group">
+      <label>Entrega - Nombre y Apellido</label>
+      <input type="text" name="entrega_nombre" class="{_err(entrega_nombre_err)}" value="{pre.get('entrega_nombre', '')}" required placeholder="Nombre y Apellido" />
+      {f'<p class="error-text">{entrega_nombre_err}</p>' if entrega_nombre_err else ''}
     </div>
-    <div class="form-row">
-      <div class="form-group">
-        <label>Recibe - Nombre y Apellido</label>
-        <input type="text" name="recibe_nombre" class="{_err(recibe_nombre_err)}" value="{pre.get('recibe_nombre', '')}" required placeholder="Nombre y Apellido" />
-        {f'<p class="error-text">{recibe_nombre_err}</p>' if recibe_nombre_err else ''}
-      </div>
-      <div class="form-group">
-        <label>Recibe - Legajo</label>
-        <input type="text" name="recibe_legajo" class="{_err(recibe_legajo_err)}" value="{pre.get('recibe_legajo', '')}" required placeholder="Ej: 502456" />
-        {f'<p class="error-text">{recibe_legajo_err}</p>' if recibe_legajo_err else '<p class="small-text">Usá solo números (501000 - 512000).</p>'}
-      </div>
+    <div class="form-group">
+      <label>Entrega - Legajo</label>
+      <input type="text" name="entrega_legajo" class="{_err(entrega_legajo_err)}" value="{pre.get('entrega_legajo', '')}" required placeholder="Ej: 501123" />
+      {f'<p class="error-text">{entrega_legajo_err}</p>' if entrega_legajo_err else '<p class="small-text">Usá solo números (501000 - 512000).</p>'}
     </div>
-    <div class="form-row">
-      <div class="form-group">
-        <label>Fecha y Hora de Recepción</label>
-        <input type="datetime-local" name="fecha_hora_recepcion" class="{_err(fecha_err)}" value="{pre.get('fecha_hora_recepcion', '')}" required />
-        {f'<p class="error-text">{fecha_err}</p>' if fecha_err else ''}
-      </div>
-      <div class="form-group">
-        <label>Observaciones (opcional)</label>
-        <textarea name="observaciones" rows="3">{pre.get('observaciones', '')}</textarea>
-      </div>
+    <div class="form-group">
+      <label>Recibe - Nombre y Apellido</label>
+      <input type="text" name="recibe_nombre" class="{_err(recibe_nombre_err)}" value="{pre.get('recibe_nombre', '')}" required placeholder="Nombre y Apellido" />
+      {f'<p class="error-text">{recibe_nombre_err}</p>' if recibe_nombre_err else ''}
+    </div>
+    <div class="form-group">
+      <label>Recibe - Legajo</label>
+      <input type="text" name="recibe_legajo" class="{_err(recibe_legajo_err)}" value="{pre.get('recibe_legajo', '')}" required placeholder="Ej: 502456" />
+      {f'<p class="error-text">{recibe_legajo_err}</p>' if recibe_legajo_err else '<p class="small-text">Usá solo números (501000 - 512000).</p>'}
+    </div>
+    <div class="form-group">
+      <label>Fecha y Hora de Recepción</label>
+      <input type="datetime-local" name="fecha_hora_recepcion" class="{_err(fecha_err)}" value="{pre.get('fecha_hora_recepcion', '')}" required />
+      {f'<p class="error-text">{fecha_err}</p>' if fecha_err else ''}
+    </div>
+    <div class="form-group">
+      <label>Observaciones (opcional)</label>
+      <textarea name="observaciones" rows="3">{pre.get('observaciones', '')}</textarea>
     </div>
     <label class="remember-toggle">
       <input type="checkbox" name="remember_defaults" {remember_prefill} />
