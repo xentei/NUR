@@ -1759,31 +1759,33 @@ def operador_puesto(puesto: str):
         content += f"""
 <div class="panel">
   <h2>📝 Notas Pendientes ({len(notas)})</h2>
-  <table>
-    <thead>
-      <tr>
-        <th>ID</th>
-        <th>N° Nota</th>
-        <th>Autoriza</th>
-        <th>Acciones</th>
-      </tr>
-    </thead>
-    <tbody>
+  <div class="table-responsive">
+    <table class="responsive-table">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>N° Nota</th>
+          <th>Autoriza</th>
+          <th>Acciones</th>
+        </tr>
+      </thead>
+      <tbody>
 """
         for n in notas:
             content += f"""
       <tr>
-        <td>{n.id}</td>
-        <td><strong>{n.nro_nota}</strong></td>
-        <td>{n.autoriza}</td>
-        <td>
-          <a href="{url_for('operador_completar_nota', nota_id=n.id)}" class="btn btn-primary" style="padding:6px 12px; font-size:12px;">✏️ Completar</a>
+        <td data-label="ID">{n.id}</td>
+        <td data-label="N° Nota"><strong>{n.nro_nota}</strong></td>
+        <td data-label="Autoriza">{n.autoriza}</td>
+        <td data-label="Acciones">
+          <a href="{url_for('operador_completar_nota', nota_id=n.id)}" class="btn btn-primary" style="padding:6px 12px; font-size:12px; width:100%; text-align:center;">✏️ Completar</a>
         </td>
       </tr>
 """
         content += """
-    </tbody>
-  </table>
+      </tbody>
+    </table>
+  </div>
 </div>
 """
     else:
