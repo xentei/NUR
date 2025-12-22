@@ -17,6 +17,10 @@
     --dark: #0f172a;
   }
 
+  *, *::before, *::after {
+    box-sizing: border-box;
+  }
+
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     background: var(--canvas);
@@ -103,6 +107,7 @@
   }
   .form-group input, .form-group select, .form-group textarea {
     width: 100%;
+    max-width: 100%;
     padding: 12px 24.5px 12px 14px;
     border: 2px solid #e5e7eb;
     border-radius: 10px;

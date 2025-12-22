@@ -18,7 +18,7 @@ Usuarios iniciales: si la DB está vacía se crearán al iniciar. Si faltan vari
 
 ### Puestos preestablecidos
 Al cargar notas, elegí el puesto desde el desplegable (con búsqueda) para evitar variantes. La lista incluye, entre otros:
-- ADICIONAL OTV, ADICIONAL TCA, BARRERA CARGAS, CABECERA NORTE/SUR, CHECKPOINT, GATE GOURMET, PUESTO PAMPA, PREEMBARQUE INTERNACIONAL/NACIONAL, TORRE DE CONTROL.
+- ADICIONAL OTV, ADICIONAL TCA, BARRERA CARGAS, CABECERA NORTE/SUR, CHECKPOINT, GATE GOURMET, PAMPA, BRAVO, ECO, CARGAS, PREEMBARQUE INTERNACIONAL/NACIONAL, TORRE DE CONTROL.
 - También podés elegir **Otro** y escribir manualmente si es un puesto nuevo puntual.
 Variables recomendadas (definilas en producción; en local se generan claves/usuarios efímeras si faltan):
 - SECRET_KEY
