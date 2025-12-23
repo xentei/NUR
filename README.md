@@ -22,13 +22,13 @@ Al cargar notas, elegí el puesto desde el desplegable (con búsqueda) para evit
 - También podés elegir **Otro** y escribir manualmente si es un puesto nuevo puntual.
 Variables recomendadas (definilas en producción; en local se generan claves/usuarios efímeras si faltan):
 - SECRET_KEY
-- DATABASE_URL (opcional; si falta se usa SQLite persistente en `/data/nur.db`)
+- DATABASE_URL (opcional; si falta o el driver no está disponible se usa SQLite persistente en `/data/nur.db`)
 
 Variables opcionales:
 - SQLITE_BUSY_TIMEOUT_MS (solo SQLite; default 5000)
 
 ### Durabilidad de base de datos (SQLite + volumen persistente)
-- **Ruta**: si no hay `DATABASE_URL`, la app usa `/data/nur.db` en Railway (o `instance/nur.db` en local) y mantiene ese archivo entre reinicios mientras el volumen persista.
+- **Ruta**: si no hay `DATABASE_URL` (o si apunta a PostgreSQL pero falta `psycopg2`), la app usa `/data/nur.db` en Railway (o `instance/nur.db` en local) y mantiene ese archivo entre reinicios mientras el volumen persista.
 - **PRAGMAs aplicados en cada conexión**: `journal_mode=WAL`, `synchronous=FULL`, `foreign_keys=ON`, `busy_timeout=SQLITE_BUSY_TIMEOUT_MS` (default 5000 ms).
 - **Backup automático al iniciar**: si el `.db` existe, se genera `/data/backups/nur-YYYYMMDDHHMMSS.db.bak` (o `instance/backups/...`). Se loguea “Backup creado en …” o el motivo del fallo pero **no** se detiene el arranque.
 - **Respaldos programados**:

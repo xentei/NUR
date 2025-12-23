@@ -137,25 +137,74 @@ PUBLIC_WHATSAPP_TEXT = os.getenv(
 
 # Configuración para Railway con volumen persistente
 # En Railway, configurá un volumen montado en /data
-DB_URI = os.getenv("DATABASE_URL")
 DB_PATH: str | None = None
 
-if DB_URI:
-    # Si hay DATABASE_URL (ej: PostgreSQL), usarla
-    SQLALCHEMY_DATABASE_URI = DB_URI
-else:
+
+def _resolve_db_uri() -> tuple[str, str | None, bool]:
+    """Devuelve (uri, db_path, using_sqlite) con tolerancia a drivers faltantes."""
+
+    raw = os.getenv("DATABASE_URL")
+    if raw:
+        db_uri_env = raw.strip()
+        if db_uri_env.startswith(("postgres://", "postgresql://")):
+            try:
+                # Importación explícita para avisar antes de arrancar workers
+                import importlib
+
+                importlib.import_module("psycopg2")
+                return db_uri_env, None, False
+            except ImportError:
+                print(
+                    "⚠️ DATABASE_URL apunta a PostgreSQL pero psycopg2 no está instalado; "
+                    "se ignorará y se usará SQLite persistente."
+                )
+        else:
+            # Para otros backends asumimos que el driver está presente
+            return db_uri_env, None, db_uri_env.startswith("sqlite")
+
     # SQLite con persistencia
     if os.path.exists(RAILWAY_VOLUME_PATH):
         # En Railway con volumen
-        DB_PATH = os.path.join(RAILWAY_VOLUME_PATH, "nur.db")
-        print(f"📁 Usando base de datos persistente en: {DB_PATH}")
+        db_path = os.path.join(RAILWAY_VOLUME_PATH, "nur.db")
+        print(f"📁 Usando base de datos persistente en: {db_path}")
     else:
         # En local
         os.makedirs(INSTANCE_DIR, exist_ok=True)
-        DB_PATH = os.path.join(INSTANCE_DIR, "nur.db")
-        print(f"📁 Usando base de datos local en: {DB_PATH}")
+        db_path = os.path.join(INSTANCE_DIR, "nur.db")
+        print(f"📁 Usando base de datos local en: {db_path}")
 
-    SQLALCHEMY_DATABASE_URI = "sqlite:///" + DB_PATH.replace("\\", "/")
+    sqlite_uri = "sqlite:///" + db_path.replace("\\", "/")
+    return sqlite_uri, db_path, True
+
+
+SQLALCHEMY_DATABASE_URI, DB_PATH, USING_SQLITE = _resolve_db_uri()
+
+
+def create_sqlite_backup(db_path: str | None) -> None:
+    """Genera un backup puntual de SQLite si existe un archivo previo.
+
+    Esto no reemplaza un backup programado, pero evita perder datos por
+    corrupción puntual al arrancar.
+    """
+
+    if not db_path:
+        return
+
+    try:
+        if not os.path.exists(db_path) or os.path.getsize(db_path) == 0:
+            return
+
+        backup_dir = os.path.join(os.path.dirname(db_path), "backups")
+        os.makedirs(backup_dir, exist_ok=True)
+        stamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+        dest = os.path.join(backup_dir, f"nur-{stamp}.db.bak")
+        shutil.copy2(db_path, dest)
+        print(f"📦 Backup creado en: {dest}")
+    except OSError as exc:
+        print(f"⚠️ No se pudo crear backup: {exc}")
+
+
+create_sqlite_backup(DB_PATH)
 
 
 def create_sqlite_backup(db_path: str | None) -> None:
@@ -192,7 +241,6 @@ app.config["SECRET_KEY"] = SECRET_KEY
 app.config["SQLALCHEMY_DATABASE_URI"] = SQLALCHEMY_DATABASE_URI
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
-USING_SQLITE = SQLALCHEMY_DATABASE_URI.startswith("sqlite")
 engine_options = {"pool_pre_ping": True}
 if USING_SQLITE:
     engine_options["connect_args"] = {"check_same_thread": False, "timeout": 15}
