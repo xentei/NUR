@@ -1,4 +1,3 @@
-# NUR (Flask + Login + Roles)
 
 ## Local
 ```powershell
