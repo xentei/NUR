@@ -16,6 +16,11 @@ Usuarios iniciales: si la DB está vacía se crearán al iniciar. Si faltan vari
 - **operador**: completa notas y reporta errores. Podés tildar “Guardar datos de entrega y recepción” dentro de cada nota para reusar esos datos durante toda la sesión.
 - **visor**: solo lectura de notas (filtros incluidos, sin acciones).
 
+### Flujo de reseteo de contraseñas
+- El admin puede resetear contraseñas desde **Admin → Usuarios**. Al hacerlo, se genera una contraseña temporal y el usuario queda marcado como "debe cambiarla".
+- Cuando el usuario ingresa con la contraseña temporal, se lo redirige obligatoriamente a **/change-password** para que la reemplace (mínimo 10 caracteres). Hasta que lo haga, no podrá navegar por el resto de la app.
+- La creación de usuarios no exige cambio inicial; solo los reseteos fuerzan el cambio.
+
 ### Puestos preestablecidos
 Al cargar notas, elegí el puesto desde el desplegable (con búsqueda) para evitar variantes. La lista incluye, entre otros:
 - ADICIONAL OTV, ADICIONAL TCA, BARRERA CARGAS, CABECERA NORTE/SUR, CHECKPOINT, GATE GOURMET, PAMPA, BRAVO, ECO, CARGAS, PREEMBARQUE INTERNACIONAL/NACIONAL, TORRE DE CONTROL.

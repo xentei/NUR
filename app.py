@@ -19,7 +19,7 @@ from flask_login import (
     logout_user, current_user
 )
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import event
+from sqlalchemy import event, inspect, text
 from sqlalchemy.engine import Engine
 from flask_wtf.csrf import CSRFProtect, generate_csrf
 from markupsafe import Markup
@@ -487,6 +487,7 @@ class User(db.Model, UserMixin):
     username = db.Column(db.String(120), unique=True, nullable=False, index=True)
     password_hash = db.Column(db.String(255), nullable=False)
     role = db.Column(db.String(20), nullable=False, default=OP_ROLE, index=True)
+    must_change_password = db.Column(db.Boolean, nullable=False, default=False, server_default=text("false"))
 
     def set_password(self, pw: str) -> None:
         self.password_hash = generate_password_hash(pw)
@@ -573,6 +574,23 @@ def bootstrap_users() -> None:
 
 with app.app_context():
     db.create_all()
+    try:
+        inspector = inspect(db.engine)
+        columns = {col["name"] for col in inspector.get_columns("user")}
+        if "must_change_password" not in columns:
+            dialect = db.engine.url.get_backend_name()
+            with db.engine.begin() as conn:
+                if dialect == "sqlite":
+                    conn.execute(text("ALTER TABLE user ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0"))
+                elif dialect in {"postgresql", "postgres"}:
+                    conn.execute(text("ALTER TABLE \"user\" ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE"))
+                else:
+                    print(f"⚠️ Dialecto {dialect} no soportado para migración automática de must_change_password.")
+            # Refrescar metadata
+            db.session.commit()
+            print("🔄 Columna must_change_password agregada a tabla user.")
+    except Exception as exc:
+        print(f"⚠️ No se pudo verificar/agregar must_change_password: {exc}")
     bootstrap_users()
     print(f"✅ Base de datos inicializada correctamente")
     print(f"📊 Usuarios: {User.query.count()} | Notas: {Nota.query.count()} | Errores: {ErrorReporte.query.count()}")
@@ -646,6 +664,8 @@ def index():
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if current_user.is_authenticated:
+        if current_user.must_change_password:
+            return redirect(url_for("change_password"))
         if current_user.role == ADMIN_ROLE:
             return redirect(url_for("admin_home"))
         elif current_user.role == DOP_ROLE:
@@ -670,7 +690,11 @@ def login():
             session.permanent = True
             login_user(user)
             flash("Bienvenido!", "success")
-            
+
+            if user.must_change_password:
+                flash("Tenés que cambiar tu contraseña por seguridad.", "warning")
+                return redirect(url_for("change_password"))
+
             if user.role == ADMIN_ROLE:
                 return redirect(url_for("admin_home"))
             elif user.role == DOP_ROLE:
@@ -692,6 +716,60 @@ def logout():
     logout_user()
     flash("Sesión cerrada correctamente.", "success")
     return redirect(url_for("login"))
+
+
+@app.before_request
+def enforce_password_change():
+    if not current_user.is_authenticated:
+        return
+
+    endpoint = request.endpoint or ""
+    allowed = {"login", "logout", "change_password", "static"}
+    if endpoint in allowed or endpoint.startswith("static"):
+        return
+
+    if getattr(current_user, "must_change_password", False):
+        if endpoint != "change_password":
+            flash("Tenés que cambiar tu contraseña por seguridad.", "warning")
+        return redirect(url_for("change_password"))
+
+
+@app.route("/change-password", methods=["GET", "POST"])
+@login_required
+def change_password():
+    if request.method == "POST":
+        current_pw = request.form.get("current_password", "")
+        new_pw = request.form.get("new_password", "")
+        confirm_pw = request.form.get("confirm_password", "")
+
+        if not current_user.check_password(current_pw):
+            flash("La contraseña actual es incorrecta.", "danger")
+            return render_template("change_password.html")
+
+        if new_pw != confirm_pw:
+            flash("La nueva contraseña y su confirmación no coinciden.", "danger")
+            return render_template("change_password.html")
+
+        if len(new_pw) < 10:
+            flash("La nueva contraseña debe tener al menos 10 caracteres.", "warning")
+            return render_template("change_password.html")
+
+        current_user.set_password(new_pw)
+        current_user.must_change_password = False
+        db.session.commit()
+
+        flash("Contraseña actualizada correctamente.", "success")
+
+        if current_user.role == ADMIN_ROLE:
+            return redirect(url_for("admin_home"))
+        elif current_user.role == DOP_ROLE:
+            return redirect(url_for("dop_home"))
+        elif current_user.role == OP_ROLE:
+            return redirect(url_for("operador_home"))
+        else:
+            return redirect(url_for("visor_home"))
+
+    return render_template("change_password.html")
 
 
 # =========================
@@ -1134,6 +1212,7 @@ def admin_reset_password(user_id: int):
 
         new_pass = secrets.token_urlsafe(12)
         user.set_password(new_pass)
+        user.must_change_password = True
         db.session.commit()
 
         known_pw = session.get("known_passwords", {}) if isinstance(session.get("known_passwords", {}), dict) else {}
