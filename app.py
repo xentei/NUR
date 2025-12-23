@@ -266,7 +266,6 @@ login_manager.login_message = "Tenés que iniciar sesión."
 
 if USING_SQLITE:
 
-    @event.listens_for(db.engine, "connect")
     def set_sqlite_pragma(dbapi_connection, connection_record):  # pragma: no cover - configuración
         try:
             cursor = dbapi_connection.cursor()
