@@ -22,14 +22,19 @@ Al cargar notas, elegí el puesto desde el desplegable (con búsqueda) para evit
 - También podés elegir **Otro** y escribir manualmente si es un puesto nuevo puntual.
 Variables recomendadas (definilas en producción; en local se generan claves/usuarios efímeras si faltan):
 - SECRET_KEY
+- DATABASE_URL (opcional; si falta se usa SQLite persistente en `/data/nur.db`)
 
 Variables opcionales:
+- SQLITE_BUSY_TIMEOUT_MS (solo SQLite; default 5000)
 
-### Durabilidad de base de datos
-- **Producción**: usá un `DATABASE_URL` de PostgreSQL (Railway lo provee). La base queda replicada en disco y manejada por el motor, sin depender del contenedor.
-- **SQLite con volumen**: si no definís `DATABASE_URL`, la app usa `/data/nur.db` (o `instance/nur.db` en local) y aplica `WAL + synchronous=FULL + foreign_keys=ON + busy_timeout` para evitar corrupción y cortes abruptos.
-- **Backup automático al iniciar**: si `nur.db` ya existe, se crea una copia puntual en `/data/backups/nur-YYYYMMDDHHMMSS.db.bak` (o `instance/backups/...`). Esto no reemplaza backups programados, pero te protege ante un arranque con archivo dañado.
-- **Respaldos programados**: en Railway podés agregar un cron/Job que ejecute `python app.py --export-csv` (o un simple `cp /data/nur.db /data/backups/...`) para tener snapshots recurrentes.
+### Durabilidad de base de datos (SQLite + volumen persistente)
+- **Ruta**: si no hay `DATABASE_URL`, la app usa `/data/nur.db` en Railway (o `instance/nur.db` en local) y mantiene ese archivo entre reinicios mientras el volumen persista.
+- **PRAGMAs aplicados en cada conexión**: `journal_mode=WAL`, `synchronous=FULL`, `foreign_keys=ON`, `busy_timeout=SQLITE_BUSY_TIMEOUT_MS` (default 5000 ms).
+- **Backup automático al iniciar**: si el `.db` existe, se genera `/data/backups/nur-YYYYMMDDHHMMSS.db.bak` (o `instance/backups/...`). Se loguea “Backup creado en …” o el motivo del fallo pero **no** se detiene el arranque.
+- **Respaldos programados**:
+  - CSV: `python app.py --export-csv --out-dir /data/backups` (genera `notas-*.csv` y `errores-*.csv` sin levantar el server). En Railway podés agendar un Job/cron con este comando.
+  - Copia binaria: `cp /data/nur.db /data/backups/nur-$(date +%Y%m%d%H%M%S).db.bak`
+- **Montar volumen en Railway**: en el servicio, agregá un Volume y montalo en `/data` (Default Mount Path). La app detecta ese path (`RAILWAY_VOLUME_MOUNT_PATH`) automáticamente.
 
 ## ¿Cómo aplico los cambios desde GitHub y los despliego?
 1. **Abrí el Pull Request en GitHub**

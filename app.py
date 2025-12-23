@@ -1,3 +1,4 @@
+import argparse
 import os
 import re
 import shutil
@@ -28,6 +29,13 @@ from werkzeug.security import generate_password_hash, check_password_hash
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 RAILWAY_VOLUME_PATH = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "/data")
 INSTANCE_DIR = os.path.join(BASE_DIR, "instance")
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, default))
+    except Exception:
+        return default
 
 
 def _bool_env(name: str, default: bool = False) -> bool:
@@ -169,9 +177,9 @@ def create_sqlite_backup(db_path: str | None) -> None:
         stamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
         dest = os.path.join(backup_dir, f"nur-{stamp}.db.bak")
         shutil.copy2(db_path, dest)
-        print(f"📦 Copia de seguridad de SQLite creada en: {dest}")
+        print(f"📦 Backup creado en: {dest}")
     except OSError as exc:
-        print(f"⚠️ No se pudo generar backup de SQLite: {exc}")
+        print(f"⚠️ No se pudo crear backup: {exc}")
 
 
 create_sqlite_backup(DB_PATH)
@@ -217,7 +225,8 @@ if USING_SQLITE:
             cursor.execute("PRAGMA journal_mode=WAL;")
             cursor.execute("PRAGMA synchronous=FULL;")
             cursor.execute("PRAGMA foreign_keys=ON;")
-            cursor.execute("PRAGMA busy_timeout=5000;")
+            timeout_ms = _int_env("SQLITE_BUSY_TIMEOUT_MS", 5000)
+            cursor.execute(f"PRAGMA busy_timeout={timeout_ms};")
             cursor.close()
         except Exception as exc:  # pragma: no cover - protección defensiva
             print(f"⚠️ No se pudieron aplicar PRAGMA de durabilidad en SQLite: {exc}")
@@ -2142,10 +2151,76 @@ def internal_error(e):
     return "<h1>500 - Error interno del servidor</h1><a href='/'>Volver</a>", 500
 
 
+def export_tables_to_csv(out_dir: str | None = None) -> list[str]:
+    """Exporta tablas clave a CSV sin iniciar el servidor web."""
+
+    default_dir = out_dir
+    if not default_dir:
+        if os.path.exists(RAILWAY_VOLUME_PATH):
+            default_dir = os.path.join(RAILWAY_VOLUME_PATH, "backups")
+        else:
+            default_dir = os.path.join(INSTANCE_DIR, "backups")
+
+    os.makedirs(default_dir, exist_ok=True)
+    stamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    nota_path = os.path.join(default_dir, f"notas-{stamp}.csv")
+    err_path = os.path.join(default_dir, f"errores-{stamp}.csv")
+
+    def _fmt(dt_val):
+        return dt_val.isoformat() if dt_val else ""
+
+    with app.app_context():
+        notas = Nota.query.order_by(Nota.id).all()
+        with open(nota_path, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
+            writer.writerow([
+                "ID", "NroNota", "Autoriza", "Puesto", "Estado",
+                "EntregaNombre", "EntregaLegajo",
+                "RecibeNombre", "RecibeLegajo",
+                "FechaHoraRecepcion", "Observaciones",
+                "CreadoPor", "CreadoEn", "CompletadoPor", "CompletadoEn",
+            ])
+            for n in notas:
+                writer.writerow([
+                    n.id, n.nro_nota, n.autoriza, n.puesto, n.estado,
+                    n.entrega_nombre or "", n.entrega_legajo or "",
+                    n.recibe_nombre or "", n.recibe_legajo or "",
+                    _fmt(n.fecha_hora_recepcion), n.observaciones or "",
+                    n.creado_por or "", _fmt(n.creado_en),
+                    n.completado_por or "", _fmt(n.completado_en),
+                ])
+
+        errores = ErrorReporte.query.order_by(ErrorReporte.id).all()
+        with open(err_path, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
+            writer.writerow([
+                "ID", "NotaID", "NroNota", "Puesto", "ReportadoPor",
+                "Detalle", "CreadoEn", "Estado",
+            ])
+            for err in errores:
+                writer.writerow([
+                    err.id, err.nota_id or "", err.nro_nota or "",
+                    err.puesto or "", err.reportado_por or "",
+                    err.detalle or "", _fmt(err.creado_en), err.estado or "",
+                ])
+
+    return [nota_path, err_path]
+
+
 # =========================
 # Run
 # =========================
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 5000))
-    debug = _bool_env("FLASK_DEBUG", False)
-    app.run(host="0.0.0.0", port=port, debug=debug)
+    parser = argparse.ArgumentParser(description="NUR utility runner")
+    parser.add_argument("--export-csv", action="store_true", help="Exporta tablas a CSV y sale")
+    parser.add_argument("--out-dir", help="Directorio destino para los CSV y backups", default=None)
+    args = parser.parse_args()
+
+    if args.export_csv:
+        paths = export_tables_to_csv(args.out_dir)
+        for p in paths:
+            print(f"📤 CSV generado en: {p}")
+    else:
+        port = int(os.getenv("PORT", 5000))
+        debug = _bool_env("FLASK_DEBUG", False)
+        app.run(host="0.0.0.0", port=port, debug=debug)
