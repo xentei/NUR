@@ -206,6 +206,33 @@ def create_sqlite_backup(db_path: str | None) -> None:
 
 create_sqlite_backup(DB_PATH)
 
+
+def create_sqlite_backup(db_path: str | None) -> None:
+    """Genera un backup puntual de SQLite si existe un archivo previo.
+
+    Esto no reemplaza un backup programado, pero evita perder datos por
+    corrupción puntual al arrancar.
+    """
+
+    if not db_path:
+        return
+
+    try:
+        if not os.path.exists(db_path) or os.path.getsize(db_path) == 0:
+            return
+
+        backup_dir = os.path.join(os.path.dirname(db_path), "backups")
+        os.makedirs(backup_dir, exist_ok=True)
+        stamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+        dest = os.path.join(backup_dir, f"nur-{stamp}.db.bak")
+        shutil.copy2(db_path, dest)
+        print(f"📦 Backup creado en: {dest}")
+    except OSError as exc:
+        print(f"⚠️ No se pudo crear backup: {exc}")
+
+
+create_sqlite_backup(DB_PATH)
+
 # =========================
 # App init
 # =========================
