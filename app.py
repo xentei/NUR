@@ -22,6 +22,17 @@ from flask_wtf.csrf import CSRFProtect, generate_csrf
 from markupsafe import Markup
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import generate_password_hash, check_password_hash
+import sqlite3
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
+
+@event.listens_for(Engine, "connect")
+def _set_sqlite_pragma(dbapi_connection, connection_record):
+    # Solo aplica si el driver real es SQLite
+    if isinstance(dbapi_connection, sqlite3.Connection):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON;")
+        cursor.close()
 
 # =========================
 # Config
