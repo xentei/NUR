@@ -2,6 +2,8 @@ import argparse
 import os
 import re
 import shutil
+import sqlite3
+import secrets
 from datetime import datetime, timedelta
 from functools import wraps
 from io import StringIO
@@ -18,6 +20,7 @@ from flask_login import (
 )
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import event
+from sqlalchemy.engine import Engine
 from flask_wtf.csrf import CSRFProtect, generate_csrf
 from markupsafe import Markup
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -163,6 +166,7 @@ def _resolve_db_uri() -> tuple[str, str | None, bool]:
                 import importlib
 
                 importlib.import_module("psycopg2")
+                print("🔗 Usando DATABASE_URL (PostgreSQL) provisto por el entorno.")
                 return db_uri_env, None, False
             except ImportError:
                 print(
@@ -171,6 +175,7 @@ def _resolve_db_uri() -> tuple[str, str | None, bool]:
                 )
         else:
             # Para otros backends asumimos que el driver está presente
+            print("🔗 Usando DATABASE_URL provisto por el entorno.")
             return db_uri_env, None, db_uri_env.startswith("sqlite")
 
     # SQLite con persistencia
@@ -189,33 +194,6 @@ def _resolve_db_uri() -> tuple[str, str | None, bool]:
 
 
 SQLALCHEMY_DATABASE_URI, DB_PATH, USING_SQLITE = _resolve_db_uri()
-
-
-def create_sqlite_backup(db_path: str | None) -> None:
-    """Genera un backup puntual de SQLite si existe un archivo previo.
-
-    Esto no reemplaza un backup programado, pero evita perder datos por
-    corrupción puntual al arrancar.
-    """
-
-    if not db_path:
-        return
-
-    try:
-        if not os.path.exists(db_path) or os.path.getsize(db_path) == 0:
-            return
-
-        backup_dir = os.path.join(os.path.dirname(db_path), "backups")
-        os.makedirs(backup_dir, exist_ok=True)
-        stamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
-        dest = os.path.join(backup_dir, f"nur-{stamp}.db.bak")
-        shutil.copy2(db_path, dest)
-        print(f"📦 Backup creado en: {dest}")
-    except OSError as exc:
-        print(f"⚠️ No se pudo crear backup: {exc}")
-
-
-create_sqlite_backup(DB_PATH)
 
 
 def create_sqlite_backup(db_path: str | None) -> None:
@@ -276,8 +254,10 @@ login_manager.login_message = "Tenés que iniciar sesión."
 
 
 if USING_SQLITE:
-
+    @event.listens_for(Engine, "connect")
     def set_sqlite_pragma(dbapi_connection, connection_record):  # pragma: no cover - configuración
+        if not isinstance(dbapi_connection, sqlite3.Connection):
+            return
         try:
             cursor = dbapi_connection.cursor()
             cursor.execute("PRAGMA journal_mode=WAL;")
@@ -1002,6 +982,7 @@ def admin_exportar_csv():
 @role_required(ADMIN_ROLE)
 def admin_usuarios():
     usuarios = User.query.all()
+    known_passwords = session.get("known_passwords", {}) if isinstance(session.get("known_passwords", {}), dict) else {}
     
     content = f"""
 <div class="panel">
@@ -1019,7 +1000,10 @@ def admin_usuarios():
       </div>
       <div class="form-group">
         <label>Contraseña</label>
-        <input type="password" name="password" required />
+        <div class="password-wrapper">
+          <input type="password" name="password" id="admin-new-password" required />
+          <button type="button" class="toggle-pass" onclick="togglePasswordVisibility('admin-new-password', this)" aria-label="Mostrar u ocultar contraseña">👁️</button>
+        </div>
       </div>
       <div class="form-group">
         <label>Rol</label>
@@ -1039,6 +1023,7 @@ def admin_usuarios():
       <tr>
         <th>Usuario</th>
         <th>Rol</th>
+        <th>Contraseña</th>
         <th>Acciones</th>
       </tr>
     </thead>
@@ -1051,6 +1036,13 @@ def admin_usuarios():
         <td>{u.username}</td>
         <td><span class="badge badge-completed">{u.role.upper()}</span></td>
         <td>
+          <div class="password-plain">{Markup.escape(known_passwords.get(str(u.id), '')) or '<span class="muted">No disponible</span>'}</div>
+        </td>
+        <td class="user-actions">
+          <form method="POST" action="{url_for('admin_reset_password', user_id=u.id)}" style="display:inline;" onsubmit="return confirm('¿Generar una nueva contraseña para {u.username}?');">
+            {csrf_field()}
+            <button type="submit" class="btn btn-warning" style="padding:6px 12px; font-size:12px;">🔄 Reset/Mostrar</button>
+          </form>
           <form method="POST" action="{url_for('admin_borrar_usuario', user_id=u.id)}" style="display:inline;"
                 onsubmit="return confirm('¿Borrar usuario {u.username}?');">
             {csrf_field()}
@@ -1094,6 +1086,11 @@ def admin_crear_usuario():
         user.set_password(password)
         db.session.add(user)
         db.session.commit()
+
+        known_pw = session.get("known_passwords", {}) if isinstance(session.get("known_passwords", {}), dict) else {}
+        known_pw[str(user.id)] = password
+        session["known_passwords"] = known_pw
+        session.modified = True
         
         flash(f"Usuario '{username}' creado con rol {role.upper()}.", "success")
     except Exception as e:
@@ -1122,6 +1119,33 @@ def admin_borrar_usuario(user_id: int):
         db.session.rollback()
         flash(f"Error al borrar: {str(e)}", "danger")
     
+    return redirect(url_for("admin_usuarios"))
+
+
+@app.route("/admin/reset_password/<int:user_id>", methods=["POST"])
+@login_required
+@role_required(ADMIN_ROLE)
+def admin_reset_password(user_id: int):
+    try:
+        user = db.session.get(User, user_id)
+        if not user:
+            flash("Usuario no encontrado.", "danger")
+            return redirect(url_for("admin_usuarios"))
+
+        new_pass = secrets.token_urlsafe(12)
+        user.set_password(new_pass)
+        db.session.commit()
+
+        known_pw = session.get("known_passwords", {}) if isinstance(session.get("known_passwords", {}), dict) else {}
+        known_pw[str(user.id)] = new_pass
+        session["known_passwords"] = known_pw
+        session.modified = True
+
+        flash(f"Nueva contraseña para {user.username}: {new_pass}", "success")
+    except Exception as e:
+        db.session.rollback()
+        flash(f"Error al resetear contraseña: {str(e)}", "danger")
+
     return redirect(url_for("admin_usuarios"))
 
 

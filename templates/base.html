@@ -128,6 +128,26 @@
 
   .error-text { color: var(--danger); font-weight: 600; margin-top: 6px; }
 
+  .password-wrapper {
+    position: relative;
+    display: flex;
+    align-items: center;
+  }
+  .password-wrapper input { padding-right: 42px; }
+  .toggle-pass {
+    position: absolute;
+    right: 10px;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    font-size: 16px;
+    line-height: 1;
+    color: var(--muted);
+    padding: 6px;
+  }
+  .toggle-pass:focus { outline: 2px solid var(--primary); border-radius: 6px; }
+  .muted { color: var(--muted); }
+
   .combobox {
     display: grid;
     grid-template-columns: 1fr;
@@ -451,6 +471,16 @@ function openPuestoPicker(inputEl) {
   if (!inputEl) return;
   if (typeof inputEl.showPicker === 'function') {
     try { inputEl.showPicker(); } catch (e) {}
+  }
+}
+
+function togglePasswordVisibility(inputId, btn) {
+  const el = document.getElementById(inputId);
+  if (!el) return;
+  const showing = el.type === 'text';
+  el.type = showing ? 'password' : 'text';
+  if (btn) {
+    btn.setAttribute('aria-pressed', (!showing).toString());
   }
 }
 </script>

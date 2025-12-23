@@ -84,6 +84,19 @@
     margin-top: 20px;
     text-align: center;
   }
+  .password-wrapper { position: relative; display: flex; align-items: center; }
+  .password-wrapper input { padding-right: 44px; }
+  .toggle-pass {
+    position: absolute;
+    right: 10px;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    font-size: 16px;
+    color: #475569;
+    padding: 6px;
+  }
+  .toggle-pass:focus { outline: 2px solid #1d4ed8; border-radius: 6px; }
 </style>
 </head>
 <body>
@@ -106,11 +119,21 @@
     </div>
     <div class="form-group">
       <label>Contraseña</label>
-      <input type="password" name="password" required />
+      <div class="password-wrapper">
+        <input type="password" name="password" id="login-password" required />
+        <button type="button" class="toggle-pass" aria-label="Mostrar u ocultar contraseña" onclick="togglePasswordVisibility()">👁️</button>
+      </div>
     </div>
     <button type="submit" class="btn">Ingresar</button>
   </form>
   <p class="small-text">Usá tu usuario y contraseña.</p>
 </div>
+<script>
+function togglePasswordVisibility() {
+  const input = document.getElementById('login-password');
+  if (!input) return;
+  input.type = input.type === 'password' ? 'text' : 'password';
+}
+</script>
 </body>
 </html>
