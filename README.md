@@ -25,6 +25,12 @@ Variables recomendadas (definilas en producción; en local se generan claves/usu
 
 Variables opcionales:
 
+### Durabilidad de base de datos
+- **Producción**: usá un `DATABASE_URL` de PostgreSQL (Railway lo provee). La base queda replicada en disco y manejada por el motor, sin depender del contenedor.
+- **SQLite con volumen**: si no definís `DATABASE_URL`, la app usa `/data/nur.db` (o `instance/nur.db` en local) y aplica `WAL + synchronous=FULL + foreign_keys=ON + busy_timeout` para evitar corrupción y cortes abruptos.
+- **Backup automático al iniciar**: si `nur.db` ya existe, se crea una copia puntual en `/data/backups/nur-YYYYMMDDHHMMSS.db.bak` (o `instance/backups/...`). Esto no reemplaza backups programados, pero te protege ante un arranque con archivo dañado.
+- **Respaldos programados**: en Railway podés agregar un cron/Job que ejecute `python app.py --export-csv` (o un simple `cp /data/nur.db /data/backups/...`) para tener snapshots recurrentes.
+
 ## ¿Cómo aplico los cambios desde GitHub y los despliego?
 1. **Abrí el Pull Request en GitHub**
    - Entrá a la pestaña **Pull requests**.

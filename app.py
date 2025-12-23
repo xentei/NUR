@@ -1,5 +1,6 @@
 import os
 import re
+import shutil
 from datetime import datetime, timedelta
 from functools import wraps
 from io import StringIO
@@ -15,6 +16,7 @@ from flask_login import (
     logout_user, current_user
 )
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import event
 from flask_wtf.csrf import CSRFProtect, generate_csrf
 from markupsafe import Markup
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -128,6 +130,7 @@ PUBLIC_WHATSAPP_TEXT = os.getenv(
 # Configuración para Railway con volumen persistente
 # En Railway, configurá un volumen montado en /data
 DB_URI = os.getenv("DATABASE_URL")
+DB_PATH: str | None = None
 
 if DB_URI:
     # Si hay DATABASE_URL (ej: PostgreSQL), usarla
@@ -146,6 +149,33 @@ else:
 
     SQLALCHEMY_DATABASE_URI = "sqlite:///" + DB_PATH.replace("\\", "/")
 
+
+def create_sqlite_backup(db_path: str | None) -> None:
+    """Genera un backup puntual de SQLite si existe un archivo previo.
+
+    Esto no reemplaza un backup programado, pero evita perder datos por
+    corrupción puntual al arrancar.
+    """
+
+    if not db_path:
+        return
+
+    try:
+        if not os.path.exists(db_path) or os.path.getsize(db_path) == 0:
+            return
+
+        backup_dir = os.path.join(os.path.dirname(db_path), "backups")
+        os.makedirs(backup_dir, exist_ok=True)
+        stamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+        dest = os.path.join(backup_dir, f"nur-{stamp}.db.bak")
+        shutil.copy2(db_path, dest)
+        print(f"📦 Copia de seguridad de SQLite creada en: {dest}")
+    except OSError as exc:
+        print(f"⚠️ No se pudo generar backup de SQLite: {exc}")
+
+
+create_sqlite_backup(DB_PATH)
+
 # =========================
 # App init
 # =========================
@@ -153,10 +183,12 @@ app = Flask(__name__)
 app.config["SECRET_KEY"] = SECRET_KEY
 app.config["SQLALCHEMY_DATABASE_URI"] = SQLALCHEMY_DATABASE_URI
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
-    "pool_pre_ping": True,
-    "connect_args": {"check_same_thread": False},
-}
+
+USING_SQLITE = SQLALCHEMY_DATABASE_URI.startswith("sqlite")
+engine_options = {"pool_pre_ping": True}
+if USING_SQLITE:
+    engine_options["connect_args"] = {"check_same_thread": False, "timeout": 15}
+app.config["SQLALCHEMY_ENGINE_OPTIONS"] = engine_options
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=8)
 
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
@@ -174,6 +206,21 @@ csrf = CSRFProtect(app)
 login_manager = LoginManager(app)
 login_manager.login_view = "login"
 login_manager.login_message = "Tenés que iniciar sesión."
+
+
+if USING_SQLITE:
+
+    @event.listens_for(db.engine, "connect")
+    def set_sqlite_pragma(dbapi_connection, connection_record):  # pragma: no cover - configuración
+        try:
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL;")
+            cursor.execute("PRAGMA synchronous=FULL;")
+            cursor.execute("PRAGMA foreign_keys=ON;")
+            cursor.execute("PRAGMA busy_timeout=5000;")
+            cursor.close()
+        except Exception as exc:  # pragma: no cover - protección defensiva
+            print(f"⚠️ No se pudieron aplicar PRAGMA de durabilidad en SQLite: {exc}")
 
 login_attempts = defaultdict(list)
 
