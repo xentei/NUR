@@ -9,7 +9,6 @@ from datetime import datetime, timedelta
 from functools import wraps
 from io import StringIO
 import csv
-from collections import defaultdict
 
 from flask import (
     Flask, request, redirect, url_for, render_template,
@@ -257,6 +256,12 @@ csrf = CSRFProtect(app)
 login_manager = LoginManager(app)
 login_manager.login_view = "login"
 login_manager.login_message = "Tenés que iniciar sesión."
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=[],
+    storage_uri=os.getenv("RATE_LIMIT_STORAGE_URI", "memory://"),
+)
 
 
 if USING_SQLITE:
@@ -690,6 +695,7 @@ def index():
 
 
 @app.route("/login", methods=["GET", "POST"])
+@limiter.limit("10 per 5 minutes")
 def login():
     if current_user.is_authenticated:
         if current_user.must_change_password:
@@ -738,7 +744,7 @@ def login():
     return render_template('login.html')
 
 
-@app.route("/logout", methods=["GET", "POST"])
+@app.route("/logout", methods=["POST"])
 @login_required
 def logout():
     if request.method == "GET":
