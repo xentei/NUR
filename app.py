@@ -1,14 +1,16 @@
 import argparse
+import json
 import os
 import re
 import shutil
 import sqlite3
 import secrets
+import time
 from datetime import datetime, timedelta
 from functools import wraps
 from io import StringIO
 import csv
-from collections import defaultdict
+from collections import defaultdict  # used for in-memory login rate tracking
 
 from flask import (
     Flask, request, redirect, url_for, render_template,
@@ -21,13 +23,13 @@ from flask_login import (
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import event, inspect, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 from flask_wtf.csrf import CSRFProtect, generate_csrf
-from markupsafe import Markup
+from markupsafe import Markup, escape
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import generate_password_hash, check_password_hash
-import sqlite3
-from sqlalchemy import event
-from sqlalchemy.engine import Engine
 
 @event.listens_for(Engine, "connect")
 def _set_sqlite_pragma(dbapi_connection, connection_record):
@@ -136,6 +138,8 @@ ADMIN_ROLE = "admin"
 DOP_ROLE = "dop"
 OP_ROLE = "operador"
 VIEW_ROLE = "visor"
+LOGIN_MAX_ATTEMPTS = _int_env("LOGIN_MAX_ATTEMPTS", 100)
+LOGIN_WINDOW_MINUTES = _int_env("LOGIN_WINDOW_MINUTES", 5)
 
 SECRET_KEY = _load_secret_key()
 
@@ -233,6 +237,8 @@ app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 engine_options = {"pool_pre_ping": True}
 if USING_SQLITE:
     engine_options["connect_args"] = {"check_same_thread": False, "timeout": 15}
+else:
+    engine_options["connect_args"] = {"connect_timeout": 10}
 app.config["SQLALCHEMY_ENGINE_OPTIONS"] = engine_options
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=8)
 
@@ -245,12 +251,21 @@ if not _bool_env("FLASK_DEBUG", False):
         REMEMBER_COOKIE_HTTPONLY=True,
         REMEMBER_COOKIE_SAMESITE="Lax",
     )
+    if _bool_env("PREFER_SECURE_COOKIES", True):
+        app.config["SESSION_COOKIE_SECURE"] = False
+        app.config["REMEMBER_COOKIE_SECURE"] = False
 
 db = SQLAlchemy(app)
 csrf = CSRFProtect(app)
 login_manager = LoginManager(app)
 login_manager.login_view = "login"
 login_manager.login_message = "Tenés que iniciar sesión."
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=[],
+    storage_uri=os.getenv("RATE_LIMIT_STORAGE_URI", "memory://"),
+)
 
 
 if USING_SQLITE:
@@ -269,16 +284,38 @@ if USING_SQLITE:
         except Exception as exc:  # pragma: no cover - protección defensiva
             print(f"⚠️ No se pudieron aplicar PRAGMA de durabilidad en SQLite: {exc}")
 
+def esc(value: object, default: str = "") -> Markup:
+    return escape(default if value is None else str(value))
+
+
+def js_str(value: object, default: str = "") -> str:
+    return escape(json.dumps(default if value is None else str(value)))
+
+
+def sanitize_csv(value: object) -> str:
+    text = "" if value is None else str(value)
+    if text and text[0] in ("=", "+", "-", "@"):
+        return f"'{text}"
+    return text
+
+
 login_attempts = defaultdict(list)
 
-def check_rate_limit(ip: str, max_attempts: int = 10, window_minutes: int = 5) -> bool:
+
+def is_rate_limited(ip: str) -> bool:
     now = datetime.utcnow()
-    cutoff = now - timedelta(minutes=window_minutes)
-    login_attempts[ip] = [t for t in login_attempts[ip] if t > cutoff]
-    if len(login_attempts[ip]) >= max_attempts:
-        return False
-    login_attempts[ip].append(now)
-    return True
+    cutoff = now - timedelta(minutes=LOGIN_WINDOW_MINUTES)
+    attempts = [t for t in login_attempts[ip] if t > cutoff]
+    login_attempts[ip] = attempts
+    return len(attempts) >= LOGIN_MAX_ATTEMPTS
+
+
+def record_failed_login(ip: str) -> None:
+    login_attempts[ip].append(datetime.utcnow())
+
+
+def reset_login_attempts(ip: str) -> None:
+    login_attempts.pop(ip, None)
 
 
 def csrf_field() -> Markup:
@@ -459,7 +496,7 @@ def puesto_select_component(
     other_value: str = "",
 ) -> str:
     options = "".join([
-        f'<option value="{p}">{p}</option>'
+        f'<option value="{esc(p)}">{esc(p)}</option>'
         for p in PUESTOS_PREDEFINIDOS
     ])
     show_other = "" if selected == "OTRO" else "style=\"display:none;\""
@@ -468,12 +505,12 @@ def puesto_select_component(
     return f"""
     <div class="form-group">
       <label>Puesto</label>
-      <input type="text" name="{select_name}" id="{select_name}" list="{datalist_id}" placeholder="Elegí un puesto" value="{preset_value}" oninput="handlePuestoInput(this, '{other_name}')" onfocus="openPuestoPicker(this)" onclick="openPuestoPicker(this)" autocomplete="off" />
+      <input type="text" name="{esc(select_name)}" id="{esc(select_name)}" list="{esc(datalist_id)}" placeholder="Elegí un puesto" value="{esc(preset_value)}" oninput="handlePuestoInput(this, '{esc(other_name)}')" onfocus="openPuestoPicker(this)" onclick="openPuestoPicker(this)" autocomplete="off" />
       <datalist id="{datalist_id}">
         <option value="">-- Seleccionar puesto --</option>
         {options}
       </datalist>
-      <input type="text" name="{other_name}" id="{other_name}" placeholder="Escribí el puesto" value="{other_value}" {show_other} />
+      <input type="text" name="{esc(other_name)}" id="{esc(other_name)}" placeholder="Escribí el puesto" value="{esc(other_value)}" {show_other} />
       <p class="small-text">Elegí un puesto de la lista o escribí "OTRO" para completarlo.</p>
     </div>
     """
@@ -572,28 +609,41 @@ def bootstrap_users() -> None:
     db.session.commit()
 
 
-with app.app_context():
-    db.create_all()
-    try:
-        inspector = inspect(db.engine)
-        columns = {col["name"] for col in inspector.get_columns("user")}
-        if "must_change_password" not in columns:
-            dialect = db.engine.url.get_backend_name()
-            with db.engine.begin() as conn:
-                if dialect == "sqlite":
-                    conn.execute(text("ALTER TABLE user ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0"))
-                elif dialect in {"postgresql", "postgres"}:
-                    conn.execute(text("ALTER TABLE \"user\" ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE"))
-                else:
-                    print(f"⚠️ Dialecto {dialect} no soportado para migración automática de must_change_password.")
-            # Refrescar metadata
-            db.session.commit()
-            print("🔄 Columna must_change_password agregada a tabla user.")
-    except Exception as exc:
-        print(f"⚠️ No se pudo verificar/agregar must_change_password: {exc}")
-    bootstrap_users()
-    print(f"✅ Base de datos inicializada correctamente")
-    print(f"📊 Usuarios: {User.query.count()} | Notas: {Nota.query.count()} | Errores: {ErrorReporte.query.count()}")
+def init_db_with_retry(max_attempts: int = 12, delay_seconds: float = 2.0) -> None:
+    """Inicializa la DB con reintentos para evitar fallas por cold start."""
+    with app.app_context():
+        for attempt in range(1, max_attempts + 1):
+            try:
+                with db.engine.connect() as conn:
+                    conn.execute(text("SELECT 1"))
+                db.create_all()
+                try:
+                    inspector = inspect(db.engine)
+                    columns = {col["name"] for col in inspector.get_columns("user")}
+                    if "must_change_password" not in columns:
+                        dialect = db.engine.url.get_backend_name()
+                        with db.engine.begin() as conn:
+                            if dialect == "sqlite":
+                                conn.execute(text("ALTER TABLE user ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0"))
+                            elif dialect in {"postgresql", "postgres"}:
+                                conn.execute(text("ALTER TABLE \"user\" ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE"))
+                            else:
+                                print(f"⚠️ Dialecto {dialect} no soportado para migración automática de must_change_password.")
+                        db.session.commit()
+                        print("🔄 Columna must_change_password agregada a tabla user.")
+                except Exception as exc:
+                    print(f"⚠️ No se pudo verificar/agregar must_change_password: {exc}")
+
+                bootstrap_users()
+                print("✅ Base de datos inicializada correctamente")
+                print(f"📊 Usuarios: {User.query.count()} | Notas: {Nota.query.count()} | Errores: {ErrorReporte.query.count()}")
+                return
+            except OperationalError as exc:
+                if attempt == max_attempts:
+                    print(f"❌ DB no disponible tras {max_attempts} intentos: {exc}")
+                    raise
+                print(f"⏳ DB no disponible (intento {attempt}/{max_attempts}). Reintentando en {delay_seconds}s...")
+                time.sleep(delay_seconds)
 
 
 # =========================
@@ -641,6 +691,11 @@ def render_page(
         content_html=Markup(content_html),
     )
 
+
+@app.before_serving
+def _init_db_on_startup() -> None:
+    init_db_with_retry()
+
 # Continuaré con las rutas en el siguiente mensaje...
 
 # =========================
@@ -676,11 +731,10 @@ def login():
             return redirect(url_for("visor_home"))
     
     if request.method == "POST":
-        ip = request.remote_addr
-        if not check_rate_limit(ip):
+        ip = request.remote_addr or "unknown"
+        if is_rate_limited(ip):
             flash("Demasiados intentos. Esperá unos minutos.", "danger")
             return redirect(url_for("login"))
-        
         username = sanitize_text(request.form.get("username", ""))
         password = request.form.get("password", "")
         
@@ -689,6 +743,7 @@ def login():
             session.clear()
             session.permanent = True
             login_user(user)
+            reset_login_attempts(ip)
             flash("Bienvenido!", "success")
 
             if user.must_change_password:
@@ -704,6 +759,7 @@ def login():
             else:
                 return redirect(url_for("visor_home"))
         else:
+            record_failed_login(ip)
             flash("Usuario o contraseña incorrectos.", "danger")
     
     return render_template('login.html')
@@ -712,6 +768,28 @@ def login():
 @app.route("/logout", methods=["GET", "POST"])
 @login_required
 def logout():
+    if request.method == "GET":
+        content = f"""
+<div class="panel">
+  <h2>¿Querés cerrar sesión?</h2>
+  <p class="small-text">Vas a volver a la pantalla de login.</p>
+  <form method="POST" action="{url_for('logout')}">
+    {csrf_field()}
+    <div class="action-row">
+      <button type="submit" class="btn btn-secondary">Cerrar sesión</button>
+      <a href="{url_for('index')}" class="btn btn-primary">Cancelar</a>
+    </div>
+  </form>
+</div>
+"""
+        return render_page(
+            "Confirmar cierre de sesión",
+            content,
+            show_admin_nav=current_user.role == ADMIN_ROLE,
+            show_dop_nav=current_user.role == DOP_ROLE,
+            show_op_nav=current_user.role == OP_ROLE,
+            show_view_nav=current_user.role == VIEW_ROLE,
+        )
     session.clear()
     logout_user()
     flash("Sesión cerrada correctamente.", "success")
@@ -732,6 +810,33 @@ def enforce_password_change():
         if endpoint != "change_password":
             flash("Tenés que cambiar tu contraseña por seguridad.", "warning")
         return redirect(url_for("change_password"))
+
+
+@app.before_request
+def apply_secure_cookie_settings():
+    if _bool_env("FLASK_DEBUG", False):
+        return
+    if request.is_secure:
+        app.config["SESSION_COOKIE_SECURE"] = True
+        app.config["REMEMBER_COOKIE_SECURE"] = True
+
+
+@app.after_request
+def add_security_headers(response):
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; "
+        "base-uri 'self'; "
+        "frame-ancestors 'none'; "
+        "img-src 'self' data:; "
+        "style-src 'self' 'unsafe-inline'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "object-src 'none'",
+    )
+    return response
 
 
 @app.route("/change-password", methods=["GET", "POST"])
@@ -784,6 +889,8 @@ def admin_home():
     flt_aut = request.args.get("autoriza", "").strip()
     flt_puesto = request.args.get("puesto", "").strip()
     draft_admin = session.pop("draft_admin", {})
+    page = max(int(request.args.get("page", 1) or 1), 1)
+    per_page = 100
     
     q = Nota.query
     if flt_nro:
@@ -793,14 +900,23 @@ def admin_home():
     if flt_puesto:
         q = q.filter(Nota.puesto.contains(flt_puesto))
 
-    notas = q.order_by(Nota.id.desc()).limit(250).all()
+    total_notas = q.count()
+    notas = q.order_by(Nota.id.desc()).offset((page - 1) * per_page).limit(per_page + 1).all()
+    has_next = len(notas) > per_page
+    notas = notas[:per_page]
+    total_pages = max((total_notas + per_page - 1) // per_page, 1)
 
-    catalog_options = "".join([f'<option value="{p}">{p}</option>' for p in PUESTOS_PREDEFINIDOS])
+    catalog_options = "".join([f'<option value="{esc(p)}">{esc(p)}</option>' for p in PUESTOS_PREDEFINIDOS])
 
     draft_nro = draft_admin.get("nro_nota", "")
     draft_aut = draft_admin.get("autoriza", "")
     draft_predef = draft_admin.get("puesto_predef", "")
     draft_otro = draft_admin.get("puesto_otro", "")
+
+    flt_nro_safe = esc(flt_nro)
+    flt_aut_safe = esc(flt_aut)
+    flt_puesto_safe = esc(flt_puesto)
+    draft_nro_safe = esc(draft_nro)
 
     content = f"""
 <div class="panel panel-highlight">
@@ -816,7 +932,7 @@ def admin_home():
     <div class="grid">
       <div class="form-group">
         <label>N° Nota</label>
-        <input type="text" name="nro_nota" required placeholder="Ej: 9983; 9982; 9992" value="{draft_nro}" />
+        <input type="text" name="nro_nota" required placeholder="Ej: 9983; 9982; 9992" value="{draft_nro_safe}" />
       </div>
       <div class="form-group">
         <label>Autoriza</label>
@@ -838,7 +954,7 @@ def admin_home():
     <div class="grid">
       <div class="form-group">
         <label>Filtrar por N° Nota</label>
-        <input type="text" name="nro_nota" value="{flt_nro}" />
+        <input type="text" name="nro_nota" value="{flt_nro_safe}" />
       </div>
       <div class="form-group">
         <label>Filtrar por Autoriza</label>
@@ -850,7 +966,7 @@ def admin_home():
       </div>
       <div class="form-group">
         <label>Filtrar por Puesto</label>
-        <input type="text" name="puesto" value="{flt_puesto}" list="catalog_puestos" placeholder="Escribí o elegí" />
+        <input type="text" name="puesto" value="{flt_puesto_safe}" list="catalog_puestos" placeholder="Escribí o elegí" />
         <datalist id="catalog_puestos">
           <option value="">-- Seleccionar --</option>
           {catalog_options}
@@ -863,8 +979,8 @@ def admin_home():
       <a href="{url_for('admin_home')}" class="btn btn-secondary">🔄 Limpiar filtros</a>
     </div>
   </form>
-  
-  <table>
+  <div class="table-responsive">
+  <table class="responsive-table">
     <thead>
       <tr>
         <th>ID</th>
@@ -883,23 +999,23 @@ def admin_home():
     
     for n in notas:
         estado_badge = '<span class="badge badge-pending">PENDIENTE</span>' if n.estado == 'PENDIENTE' else '<span class="badge badge-completed">COMPLETADA</span>'
-        entrega = f"{n.entrega_nombre or ''} {('('+n.entrega_legajo+')') if n.entrega_legajo else ''}"
-        recibe = f"{n.recibe_nombre or ''} {('('+n.recibe_legajo+')') if n.recibe_legajo else ''}"
-        recepcion = n.fecha_hora_recepcion.strftime('%d/%m %H:%M') if n.fecha_hora_recepcion else ''
+        entrega = f"{esc(n.entrega_nombre or '')} {esc(f'({n.entrega_legajo})') if n.entrega_legajo else ''}"
+        recibe = f"{esc(n.recibe_nombre or '')} {esc(f'({n.recibe_legajo})') if n.recibe_legajo else ''}"
+        recepcion = esc(n.fecha_hora_recepcion.strftime('%d/%m %H:%M') if n.fecha_hora_recepcion else '')
         
         content += f"""
       <tr>
-        <td>{n.id}</td>
-        <td><strong>{n.nro_nota}</strong></td>
-        <td>{n.autoriza}</td>
-        <td>{n.puesto}</td>
+        <td>{esc(n.id)}</td>
+        <td><strong>{esc(n.nro_nota)}</strong></td>
+        <td>{esc(n.autoriza)}</td>
+        <td>{esc(n.puesto)}</td>
         <td>{estado_badge}</td>
         <td>{entrega}</td>
         <td>{recibe}</td>
         <td>{recepcion}</td>
         <td>
           <form method="POST" action="{url_for('admin_borrar_nota', nota_id=n.id)}" style="display:inline;"
-                onsubmit="return confirm('¿Borrar nota #{n.id}?');">
+            onsubmit="return confirm({js_str(f'¿Borrar nota #{n.id}?')});">
             {csrf_field()}
             <button type="submit" class="btn btn-danger" style="padding:6px 12px; font-size:12px;">🗑️ Borrar</button>
           </form>
@@ -910,7 +1026,14 @@ def admin_home():
     content += """
     </tbody>
   </table>
-  <p class="small-text" style="margin-top:15px;">Mostrando hasta 250 registros.</p>
+  </div>
+  <div class="action-row" style="margin-top:15px;">
+    <span class="small-text">Mostrando página {esc(page)} de {esc(total_pages)} ({esc(total_notas)} registros).</span>
+    <div class="action-row">
+      {f'<a href="{url_for("admin_home", nro_nota=flt_nro, autoriza=flt_aut, puesto=flt_puesto, page=page-1)}" class="btn btn-secondary">← Anterior</a>' if page > 1 else ''}
+      {f'<a href="{url_for("admin_home", nro_nota=flt_nro, autoriza=flt_aut, puesto=flt_puesto, page=page+1)}" class="btn btn-secondary">Siguiente →</a>' if has_next else ''}
+    </div>
+  </div>
 </div>
 """
     
@@ -966,9 +1089,10 @@ def admin_crear_nota():
 
         session.pop("draft_admin", None)
         flash(f"Notas creadas: {', '.join(nro_list)} - {puesto}", "success")
-    except Exception as e:
+    except Exception:
         db.session.rollback()
-        flash(f"Error al crear nota: {str(e)}", "danger")
+        app.logger.exception("Error al crear nota")
+        flash("Error al crear nota. Intentá nuevamente.", "danger")
     
     return redirect(url_for("admin_home"))
 
@@ -980,14 +1104,16 @@ def admin_borrar_nota(nota_id: int):
     try:
         nota = db.session.get(Nota, nota_id)
         if nota:
+            nro_nota = nota.nro_nota
             db.session.delete(nota)
             db.session.commit()
-            flash(f"Nota #{nota_id} borrada.", "success")
+            flash(f"Nota N° {nro_nota} borrada. (ID interno #{nota_id})", "success")
         else:
             flash("Nota no encontrada.", "warning")
-    except Exception as e:
+    except Exception:
         db.session.rollback()
-        flash(f"Error al borrar: {str(e)}", "danger")
+        app.logger.exception("Error al borrar nota")
+        flash("Error al borrar nota. Intentá nuevamente.", "danger")
     
     return redirect(url_for("admin_home"))
 
@@ -1026,20 +1152,20 @@ def admin_exportar_csv():
         for n in notas:
             cw.writerow([
                 n.id,
-                n.nro_nota,
-                n.autoriza,
-                n.puesto,
-                n.estado,
-                n.entrega_nombre or "",
-                n.entrega_legajo or "",
-                n.recibe_nombre or "",
-                n.recibe_legajo or "",
-                n.fecha_hora_recepcion.isoformat() if n.fecha_hora_recepcion else "",
-                n.observaciones or "",
-                n.creado_por or "",
-                n.creado_en.isoformat() if n.creado_en else "",
-                n.completado_por or "",
-                n.completado_en.isoformat() if n.completado_en else ""
+                sanitize_csv(n.nro_nota),
+                sanitize_csv(n.autoriza),
+                sanitize_csv(n.puesto),
+                sanitize_csv(n.estado),
+                sanitize_csv(n.entrega_nombre or ""),
+                sanitize_csv(n.entrega_legajo or ""),
+                sanitize_csv(n.recibe_nombre or ""),
+                sanitize_csv(n.recibe_legajo or ""),
+                sanitize_csv(n.fecha_hora_recepcion.isoformat() if n.fecha_hora_recepcion else ""),
+                sanitize_csv(n.observaciones or ""),
+                sanitize_csv(n.creado_por or ""),
+                sanitize_csv(n.creado_en.isoformat() if n.creado_en else ""),
+                sanitize_csv(n.completado_por or ""),
+                sanitize_csv(n.completado_en.isoformat() if n.completado_en else "")
             ])
         
         output = si.getvalue()
@@ -1050,8 +1176,9 @@ def admin_exportar_csv():
             mimetype="text/csv",
             headers={"Content-Disposition": "attachment;filename=notas.csv"}
         )
-    except Exception as e:
-        flash(f"Error al exportar: {str(e)}", "danger")
+    except Exception:
+        app.logger.exception("Error al exportar CSV (admin)")
+        flash("Error al exportar CSV. Intentá nuevamente.", "danger")
         return redirect(url_for("admin_home"))
 
 
@@ -1060,7 +1187,6 @@ def admin_exportar_csv():
 @role_required(ADMIN_ROLE)
 def admin_usuarios():
     usuarios = User.query.all()
-    known_passwords = session.get("known_passwords", {}) if isinstance(session.get("known_passwords", {}), dict) else {}
     
     content = f"""
 <div class="panel">
@@ -1096,7 +1222,8 @@ def admin_usuarios():
     <button type="submit" class="btn btn-success">➕ Crear Usuario</button>
   </form>
   
-  <table>
+  <div class="table-responsive">
+  <table class="responsive-table">
     <thead>
       <tr>
         <th>Usuario</th>
@@ -1111,18 +1238,18 @@ def admin_usuarios():
     for u in usuarios:
         content += f"""
       <tr>
-        <td>{u.username}</td>
-        <td><span class="badge badge-completed">{u.role.upper()}</span></td>
+        <td>{esc(u.username)}</td>
+        <td><span class="badge badge-completed">{esc(u.role.upper())}</span></td>
         <td>
-          <div class="password-plain">{Markup.escape(known_passwords.get(str(u.id), '')) or '<span class="muted">No disponible</span>'}</div>
+          <div class="password-plain"><span class="muted">Se muestra al crear o resetear.</span></div>
         </td>
         <td class="user-actions">
-          <form method="POST" action="{url_for('admin_reset_password', user_id=u.id)}" style="display:inline;" onsubmit="return confirm('¿Generar una nueva contraseña para {u.username}?');">
+          <form method="POST" action="{url_for('admin_reset_password', user_id=u.id)}" style="display:inline;" onsubmit="return confirm({js_str(f'¿Generar una nueva contraseña para {u.username}?')});">
             {csrf_field()}
             <button type="submit" class="btn btn-warning" style="padding:6px 12px; font-size:12px;">🔄 Reset/Mostrar</button>
           </form>
           <form method="POST" action="{url_for('admin_borrar_usuario', user_id=u.id)}" style="display:inline;"
-                onsubmit="return confirm('¿Borrar usuario {u.username}?');">
+                onsubmit="return confirm({js_str(f'¿Borrar usuario {u.username}?')});">
             {csrf_field()}
             <button type="submit" class="btn btn-danger" style="padding:6px 12px; font-size:12px;">🗑️ Borrar</button>
           </form>
@@ -1133,6 +1260,7 @@ def admin_usuarios():
     content += """
     </tbody>
   </table>
+</div>
 </div>
 """
     
@@ -1165,15 +1293,11 @@ def admin_crear_usuario():
         db.session.add(user)
         db.session.commit()
 
-        known_pw = session.get("known_passwords", {}) if isinstance(session.get("known_passwords", {}), dict) else {}
-        known_pw[str(user.id)] = password
-        session["known_passwords"] = known_pw
-        session.modified = True
-        
-        flash(f"Usuario '{username}' creado con rol {role.upper()}.", "success")
-    except Exception as e:
+        flash(f"Usuario '{username}' creado con rol {role.upper()}. Contraseña: {password}", "success")
+    except Exception:
         db.session.rollback()
-        flash(f"Error al crear usuario: {str(e)}", "danger")
+        app.logger.exception("Error al crear usuario")
+        flash("Error al crear usuario. Intentá nuevamente.", "danger")
     
     return redirect(url_for("admin_usuarios"))
 
@@ -1193,9 +1317,10 @@ def admin_borrar_usuario(user_id: int):
                 flash(f"Usuario '{user.username}' borrado.", "success")
         else:
             flash("Usuario no encontrado.", "warning")
-    except Exception as e:
+    except Exception:
         db.session.rollback()
-        flash(f"Error al borrar: {str(e)}", "danger")
+        app.logger.exception("Error al borrar usuario")
+        flash("Error al borrar usuario. Intentá nuevamente.", "danger")
     
     return redirect(url_for("admin_usuarios"))
 
@@ -1215,15 +1340,11 @@ def admin_reset_password(user_id: int):
         user.must_change_password = True
         db.session.commit()
 
-        known_pw = session.get("known_passwords", {}) if isinstance(session.get("known_passwords", {}), dict) else {}
-        known_pw[str(user.id)] = new_pass
-        session["known_passwords"] = known_pw
-        session.modified = True
-
         flash(f"Nueva contraseña para {user.username}: {new_pass}", "success")
-    except Exception as e:
+    except Exception:
         db.session.rollback()
-        flash(f"Error al resetear contraseña: {str(e)}", "danger")
+        app.logger.exception("Error al resetear contraseña")
+        flash("Error al resetear contraseña. Intentá nuevamente.", "danger")
 
     return redirect(url_for("admin_usuarios"))
 
@@ -1239,7 +1360,8 @@ def admin_errores():
 <div class="panel">
   <h2>🚨 Reportes de Errores</h2>
   
-  <table>
+  <div class="table-responsive">
+  <table class="responsive-table">
     <thead>
       <tr>
         <th>ID</th>
@@ -1265,24 +1387,22 @@ def admin_errores():
                 f'<button type="submit" class="btn btn-success" style="padding:6px 12px; font-size:12px;">✅ Cerrar</button>'
                 f"</form>"
             )
-        
-        # Escapar HTML para el modal
-        detalle_escapado = e.detalle.replace("'", "\\'").replace('"', '&quot;').replace('\n', '\\n')
+        detalle_resumen = esc((e.detalle or "")[:50])
         
         content += f"""
       <tr>
-        <td>{e.id}</td>
-        <td>{e.nro_nota or '-'}</td>
-        <td>{e.puesto or '-'}</td>
-        <td>{e.reportado_por}</td>
-        <td>{e.detalle[:50]}...</td>
-        <td>{e.creado_en.strftime('%d/%m %H:%M')}</td>
+        <td>{esc(e.id)}</td>
+        <td>{esc(e.nro_nota or '-')}</td>
+        <td>{esc(e.puesto or '-')}</td>
+        <td>{esc(e.reportado_por)}</td>
+        <td>{detalle_resumen}...</td>
+        <td>{esc(e.creado_en.strftime('%d/%m %H:%M'))}</td>
         <td>{estado_badge}</td>
         <td>
-          <button onclick="openModal({e.id}, '{e.nro_nota or '-'}', '{e.puesto or '-'}', '{e.reportado_por}', '{detalle_escapado}', '{e.creado_en.strftime('%d/%m/%Y %H:%M')}', '{e.estado}')" class="btn btn-primary" style="padding:6px 12px; font-size:12px;">👁️ Ver</button>
+          <button onclick="openModal({esc(e.id)}, {js_str(e.nro_nota or '-')}, {js_str(e.puesto or '-')}, {js_str(e.reportado_por)}, {js_str(e.detalle or '')}, {js_str(e.creado_en.strftime('%d/%m/%Y %H:%M'))}, {js_str(e.estado)})" class="btn btn-primary" style="padding:6px 12px; font-size:12px;">👁️ Ver</button>
           {cerrar_btn}
           <form method="POST" action="{url_for('admin_borrar_error', err_id=e.id)}" style="display:inline;"
-                onsubmit="return confirm('¿Borrar reporte #{e.id}?');">
+                onsubmit="return confirm({js_str(f'¿Borrar reporte #{e.id}?')});">
             {csrf_field()}
             <button type="submit" class="btn btn-danger" style="padding:6px 12px; font-size:12px;">🗑️ Borrar</button>
           </form>
@@ -1293,6 +1413,7 @@ def admin_errores():
     content += """
     </tbody>
   </table>
+  </div>
   <p class="small-text" style="margin-top:15px;">Mostrando hasta 200 registros.</p>
 </div>
 
@@ -1385,9 +1506,10 @@ def admin_cerrar_error(err_id: int):
         err.estado = "CERRADO"
         db.session.commit()
         flash("Error marcado como cerrado.", "success")
-    except Exception as e:
+    except Exception:
         db.session.rollback()
-        flash(f"Error al cerrar reporte: {str(e)}", "danger")
+        app.logger.exception("Error al cerrar reporte")
+        flash("Error al cerrar reporte. Intentá nuevamente.", "danger")
     
     return redirect(url_for("admin_errores"))
 
@@ -1404,9 +1526,10 @@ def admin_borrar_error(err_id: int):
             flash(f"Reporte #{err_id} borrado.", "success")
         else:
             flash("Reporte no encontrado.", "warning")
-    except Exception as e:
+    except Exception:
         db.session.rollback()
-        flash(f"Error al borrar: {str(e)}", "danger")
+        app.logger.exception("Error al borrar reporte")
+        flash("Error al borrar reporte. Intentá nuevamente.", "danger")
 
     return redirect(url_for("admin_errores"))
 
@@ -1441,20 +1564,20 @@ def visor_home():
         [
             f"""
         <tr>
-          <td>{n.nro_nota}</td>
-          <td>{n.autoriza}</td>
-          <td>{n.puesto}</td>
-          <td><span class='badge badge-state {n.estado.lower()}'>{n.estado}</span></td>
-          <td>{n.entrega_nombre or '-'}<br/><span class='small-text'>{n.entrega_legajo or ''}</span></td>
-          <td>{n.recibe_nombre or '-'}<br/><span class='small-text'>{n.recibe_legajo or ''}</span></td>
-          <td>{n.completado_en.strftime('%d/%m/%Y %H:%M') if n.completado_en else '-'}</td>
+          <td>{esc(n.nro_nota)}</td>
+          <td>{esc(n.autoriza)}</td>
+          <td>{esc(n.puesto)}</td>
+          <td><span class='badge badge-state {esc(n.estado.lower())}'>{esc(n.estado)}</span></td>
+          <td>{esc(n.entrega_nombre or '-')}<br/><span class='small-text'>{esc(n.entrega_legajo or '')}</span></td>
+          <td>{esc(n.recibe_nombre or '-')}<br/><span class='small-text'>{esc(n.recibe_legajo or '')}</span></td>
+          <td>{esc(n.completado_en.strftime('%d/%m/%Y %H:%M') if n.completado_en else '-')}</td>
         </tr>
         """
             for n in notas
         ]
     )
 
-    catalog_options = "".join([f'<option value="{p}">{p}</option>' for p in PUESTOS_PREDEFINIDOS])
+    catalog_options = "".join([f'<option value="{esc(p)}">{esc(p)}</option>' for p in PUESTOS_PREDEFINIDOS])
 
     content = f"""
 <div class="panel">
@@ -1463,7 +1586,7 @@ def visor_home():
   <form method="GET" class="grid" style="margin-top:15px; gap:16px;">
     <div class="form-group">
       <label>N° Nota</label>
-      <input type="text" name="nro_nota" value="{flt_nro}" placeholder="Ej: 1234" />
+      <input type="text" name="nro_nota" value="{esc(flt_nro)}" placeholder="Ej: 1234" />
     </div>
     <div class="form-group">
       <label>Autoriza</label>
@@ -1475,7 +1598,7 @@ def visor_home():
     </div>
     <div class="form-group">
       <label>Puesto</label>
-      <input type="text" name="puesto" value="{flt_puesto}" list="catalog_puestos" placeholder="Ej: GATE A1" />
+      <input type="text" name="puesto" value="{esc(flt_puesto)}" list="catalog_puestos" placeholder="Ej: GATE A1" />
       <datalist id="catalog_puestos">
         <option value="">-- Seleccionar --</option>
         {catalog_options}
@@ -1494,7 +1617,8 @@ def visor_home():
       <a class="btn btn-secondary" href="{url_for('visor_home')}">Limpiar</a>
     </div>
   </form>
-  <table>
+  <div class="table-responsive">
+  <table class="responsive-table">
     <thead>
       <tr>
         <th>N° Nota</th>
@@ -1510,6 +1634,7 @@ def visor_home():
       {rows or '<tr><td colspan="7">Sin resultados</td></tr>'}
     </tbody>
   </table>
+  </div>
 </div>
 """
 
@@ -1530,6 +1655,8 @@ def dop_home():
     flt_aut = request.args.get("autoriza", "").strip()
     flt_puesto = request.args.get("puesto", "").strip()
     draft_dop = session.pop("draft_dop", {})
+    page = max(int(request.args.get("page", 1) or 1), 1)
+    per_page = 100
     
     q = Nota.query
     if flt_nro:
@@ -1539,14 +1666,21 @@ def dop_home():
     if flt_puesto:
         q = q.filter(Nota.puesto.contains(flt_puesto))
 
-    notas = q.order_by(Nota.id.desc()).limit(250).all()
+    total_notas = q.count()
+    notas = q.order_by(Nota.id.desc()).offset((page - 1) * per_page).limit(per_page + 1).all()
+    has_next = len(notas) > per_page
+    notas = notas[:per_page]
+    total_pages = max((total_notas + per_page - 1) // per_page, 1)
 
-    catalog_options = "".join([f'<option value="{p}">{p}</option>' for p in PUESTOS_PREDEFINIDOS])
+    catalog_options = "".join([f'<option value="{esc(p)}">{esc(p)}</option>' for p in PUESTOS_PREDEFINIDOS])
 
     draft_nro = draft_dop.get("nro_nota", "")
     draft_aut = draft_dop.get("autoriza", "")
     draft_predef = draft_dop.get("puesto_predef", "")
     draft_otro = draft_dop.get("puesto_otro", "")
+    flt_nro_safe = esc(flt_nro)
+    flt_puesto_safe = esc(flt_puesto)
+    draft_nro_safe = esc(draft_nro)
 
     content = f"""
 <div class="panel panel-highlight">
@@ -1562,7 +1696,7 @@ def dop_home():
     <div class="grid">
       <div class="form-group">
         <label>N° Nota</label>
-        <input type="text" name="nro_nota" required placeholder="Ej: 9983; 9982; 9992" value="{draft_nro}" />
+        <input type="text" name="nro_nota" required placeholder="Ej: 9983; 9982; 9992" value="{draft_nro_safe}" />
       </div>
       <div class="form-group">
         <label>Autoriza</label>
@@ -1584,7 +1718,7 @@ def dop_home():
     <div class="grid">
       <div class="form-group">
         <label>Filtrar por N° Nota</label>
-        <input type="text" name="nro_nota" value="{flt_nro}" />
+        <input type="text" name="nro_nota" value="{flt_nro_safe}" />
       </div>
       <div class="form-group">
         <label>Filtrar por Autoriza</label>
@@ -1596,7 +1730,7 @@ def dop_home():
       </div>
       <div class="form-group">
         <label>Filtrar por Puesto</label>
-        <input type="text" name="puesto" value="{flt_puesto}" list="catalog_puestos_dop" />
+        <input type="text" name="puesto" value="{flt_puesto_safe}" list="catalog_puestos_dop" />
         <datalist id="catalog_puestos_dop">
           <option value="">-- Seleccionar --</option>
           {catalog_options}
@@ -1608,7 +1742,8 @@ def dop_home():
     <a href="{url_for('dop_home')}" class="btn btn-secondary">🔄 Limpiar filtros</a>
   </form>
   
-  <table>
+  <div class="table-responsive">
+  <table class="responsive-table">
     <thead>
       <tr>
         <th>ID</th>
@@ -1626,16 +1761,16 @@ def dop_home():
     
     for n in notas:
         estado_badge = '<span class="badge badge-pending">PENDIENTE</span>' if n.estado == 'PENDIENTE' else '<span class="badge badge-completed">COMPLETADA</span>'
-        entrega = f"{n.entrega_nombre or ''} {('('+n.entrega_legajo+')') if n.entrega_legajo else ''}"
-        recibe = f"{n.recibe_nombre or ''} {('('+n.recibe_legajo+')') if n.recibe_legajo else ''}"
-        recepcion = n.fecha_hora_recepcion.strftime('%d/%m %H:%M') if n.fecha_hora_recepcion else ''
+        entrega = f"{esc(n.entrega_nombre or '')} {esc(f'({n.entrega_legajo})') if n.entrega_legajo else ''}"
+        recibe = f"{esc(n.recibe_nombre or '')} {esc(f'({n.recibe_legajo})') if n.recibe_legajo else ''}"
+        recepcion = esc(n.fecha_hora_recepcion.strftime('%d/%m %H:%M') if n.fecha_hora_recepcion else '')
         
         content += f"""
       <tr>
-        <td>{n.id}</td>
-        <td><strong>{n.nro_nota}</strong></td>
-        <td>{n.autoriza}</td>
-        <td>{n.puesto}</td>
+        <td>{esc(n.id)}</td>
+        <td><strong>{esc(n.nro_nota)}</strong></td>
+        <td>{esc(n.autoriza)}</td>
+        <td>{esc(n.puesto)}</td>
         <td>{estado_badge}</td>
         <td>{entrega}</td>
         <td>{recibe}</td>
@@ -1646,7 +1781,14 @@ def dop_home():
     content += """
     </tbody>
   </table>
-  <p class="small-text" style="margin-top:15px;">Mostrando hasta 250 registros. (Solo lectura - no podés borrar)</p>
+  </div>
+  <div class="action-row" style="margin-top:15px;">
+    <span class="small-text">Mostrando página {esc(page)} de {esc(total_pages)} ({esc(total_notas)} registros). (Solo lectura - no podés borrar)</span>
+    <div class="action-row">
+      {f'<a href="{url_for("dop_home", nro_nota=flt_nro, autoriza=flt_aut, puesto=flt_puesto, page=page-1)}" class="btn btn-secondary">← Anterior</a>' if page > 1 else ''}
+      {f'<a href="{url_for("dop_home", nro_nota=flt_nro, autoriza=flt_aut, puesto=flt_puesto, page=page+1)}" class="btn btn-secondary">Siguiente →</a>' if has_next else ''}
+    </div>
+  </div>
 </div>
 """
     
@@ -1702,9 +1844,10 @@ def dop_crear_nota():
 
         session.pop("draft_dop", None)
         flash(f"Notas creadas: {', '.join(nro_list)} - {puesto}", "success")
-    except Exception as e:
+    except Exception:
         db.session.rollback()
-        flash(f"Error al crear nota: {str(e)}", "danger")
+        app.logger.exception("Error al crear nota (DOP)")
+        flash("Error al crear nota. Intentá nuevamente.", "danger")
     
     return redirect(url_for("dop_home"))
 
@@ -1743,20 +1886,20 @@ def dop_exportar_csv():
         for n in notas:
             cw.writerow([
                 n.id,
-                n.nro_nota,
-                n.autoriza,
-                n.puesto,
-                n.estado,
-                n.entrega_nombre or "",
-                n.entrega_legajo or "",
-                n.recibe_nombre or "",
-                n.recibe_legajo or "",
-                n.fecha_hora_recepcion.isoformat() if n.fecha_hora_recepcion else "",
-                n.observaciones or "",
-                n.creado_por or "",
-                n.creado_en.isoformat() if n.creado_en else "",
-                n.completado_por or "",
-                n.completado_en.isoformat() if n.completado_en else ""
+                sanitize_csv(n.nro_nota),
+                sanitize_csv(n.autoriza),
+                sanitize_csv(n.puesto),
+                sanitize_csv(n.estado),
+                sanitize_csv(n.entrega_nombre or ""),
+                sanitize_csv(n.entrega_legajo or ""),
+                sanitize_csv(n.recibe_nombre or ""),
+                sanitize_csv(n.recibe_legajo or ""),
+                sanitize_csv(n.fecha_hora_recepcion.isoformat() if n.fecha_hora_recepcion else ""),
+                sanitize_csv(n.observaciones or ""),
+                sanitize_csv(n.creado_por or ""),
+                sanitize_csv(n.creado_en.isoformat() if n.creado_en else ""),
+                sanitize_csv(n.completado_por or ""),
+                sanitize_csv(n.completado_en.isoformat() if n.completado_en else "")
             ])
         
         output = si.getvalue()
@@ -1767,8 +1910,9 @@ def dop_exportar_csv():
             mimetype="text/csv",
             headers={"Content-Disposition": "attachment;filename=notas.csv"}
         )
-    except Exception as e:
-        flash(f"Error al exportar: {str(e)}", "danger")
+    except Exception:
+        app.logger.exception("Error al exportar CSV (DOP)")
+        flash("Error al exportar CSV. Intentá nuevamente.", "danger")
         return redirect(url_for("dop_home"))
 
 
@@ -1786,7 +1930,8 @@ def dop_errores():
     Podés ver los reportes pero no cerrarlos ni borrarlos. Solo el Admin puede gestionarlos.
   </p>
   
-  <table>
+  <div class="table-responsive">
+  <table class="responsive-table">
     <thead>
       <tr>
         <th>ID</th>
@@ -1804,19 +1949,19 @@ def dop_errores():
     
     for e in errores:
         estado_badge = '<span class="badge badge-open">ABIERTO</span>' if e.estado == 'ABIERTO' else '<span class="badge badge-closed">CERRADO</span>'
-        detalle_escapado = e.detalle.replace("'", "\\'").replace('"', '&quot;').replace('\n', '\\n')
+        detalle_resumen = esc((e.detalle or "")[:50])
         
         content += f"""
       <tr>
-        <td>{e.id}</td>
-        <td>{e.nro_nota or '-'}</td>
-        <td>{e.puesto or '-'}</td>
-        <td>{e.reportado_por}</td>
-        <td>{e.detalle[:50]}...</td>
-        <td>{e.creado_en.strftime('%d/%m %H:%M')}</td>
+        <td>{esc(e.id)}</td>
+        <td>{esc(e.nro_nota or '-')}</td>
+        <td>{esc(e.puesto or '-')}</td>
+        <td>{esc(e.reportado_por)}</td>
+        <td>{detalle_resumen}...</td>
+        <td>{esc(e.creado_en.strftime('%d/%m %H:%M'))}</td>
         <td>{estado_badge}</td>
         <td>
-          <button onclick="openModal({e.id}, '{e.nro_nota or '-'}', '{e.puesto or '-'}', '{e.reportado_por}', '{detalle_escapado}', '{e.creado_en.strftime('%d/%m/%Y %H:%M')}', '{e.estado}')" class="btn btn-primary" style="padding:6px 12px; font-size:12px;">👁️ Ver</button>
+          <button onclick="openModal({esc(e.id)}, {js_str(e.nro_nota or '-')}, {js_str(e.puesto or '-')}, {js_str(e.reportado_por)}, {js_str(e.detalle or '')}, {js_str(e.creado_en.strftime('%d/%m/%Y %H:%M'))}, {js_str(e.estado)})" class="btn btn-primary" style="padding:6px 12px; font-size:12px;">👁️ Ver</button>
         </td>
       </tr>
 """
@@ -1824,6 +1969,7 @@ def dop_errores():
     content += """
     </tbody>
   </table>
+  </div>
   <p class="small-text" style="margin-top:15px;">Mostrando hasta 200 registros.</p>
 </div>
 
@@ -1914,7 +2060,7 @@ def operador_home():
     puestos = db.session.query(Nota.puesto).filter_by(estado="PENDIENTE").distinct().order_by(Nota.puesto).all()
     puestos = [p[0] for p in puestos]
     
-    options = "".join([f'<option value="{p}">{p}</option>' for p in puestos])
+    options = "".join([f'<option value="{esc(p)}">{esc(p)}</option>' for p in puestos])
     
     content = f"""
 <div class="panel">
@@ -1961,7 +2107,7 @@ def operador_puesto(puesto: str):
 
     content = f"""
 <div class="panel">
-  <h2>📋 Puesto: {puesto}</h2>
+  <h2>📋 Puesto: {esc(puesto)}</h2>
   <p style="margin-bottom:20px;">
     Seleccioná una nota pendiente y completala. Dentro de la nota vas a poder marcar si querés conservar los datos de entrega/recepción durante esta sesión.
   </p>
@@ -1990,9 +2136,9 @@ def operador_puesto(puesto: str):
         for n in notas:
             content += f"""
       <tr>
-        <td data-label="ID">{n.id}</td>
-        <td data-label="N° Nota"><strong>{n.nro_nota}</strong></td>
-        <td data-label="Autoriza">{n.autoriza}</td>
+          <td data-label="ID">{esc(n.id)}</td>
+        <td data-label="N° Nota"><strong>{esc(n.nro_nota)}</strong></td>
+        <td data-label="Autoriza">{esc(n.autoriza)}</td>
         <td data-label="Acciones">
           <a href="{url_for('operador_completar_nota', nota_id=n.id)}" class="btn btn-primary" style="padding:6px 12px; font-size:12px; width:100%; text-align:center;">✏️ Completar</a>
         </td>
@@ -2029,9 +2175,14 @@ def operador_completar_nota(nota_id: int):
         flash("Esta nota ya fue completada.", "warning")
         return redirect(url_for("operador_puesto", puesto=nota.puesto))
     
-    session_key = f"defaults_{nota.puesto}"
-    pre = dict(session.get(session_key, {}))
-    remember_prefill = "checked" if pre else ""
+    entrega_defaults = dict(session.get("defaults_entrega", {}))
+    recibe_key = f"defaults_recibe_{nota.puesto}"
+    recibe_defaults = dict(session.get(recibe_key, {}))
+    pre = {**entrega_defaults, **recibe_defaults}
+    remember_prefill = "checked" if (entrega_defaults or recibe_defaults) else ""
+    if not pre.get("fecha_hora_recepcion"):
+        pre["fecha_hora_recepcion"] = datetime.now().strftime("%Y-%m-%dT%H:%M")
+
     field_errors: dict[str, str] = {}
 
     if request.method == "POST":
@@ -2041,6 +2192,7 @@ def operador_completar_nota(nota_id: int):
             recibe_nombre = sanitize_text(request.form.get("recibe_nombre", ""))
             recibe_legajo = normalize_legajo(request.form.get("recibe_legajo", ""))
             remember_defaults = request.form.get("remember_defaults") == "on"
+            complete_action = request.form.get("complete_action", "complete")
             fecha_str = request.form.get("fecha_hora_recepcion", "")
             observaciones = sanitize_text(request.form.get("observaciones", ""), max_len=500)
 
@@ -2052,7 +2204,7 @@ def operador_completar_nota(nota_id: int):
                 "fecha_hora_recepcion": fecha_str,
                 "observaciones": observaciones,
             })
-            remember_prefill = "checked" if remember_defaults or pre else ""
+            remember_prefill = "checked" if remember_defaults else ""
 
             if not entrega_nombre:
                 field_errors["entrega_nombre"] = "Ingresá el nombre de quien entrega."
@@ -2089,25 +2241,42 @@ def operador_completar_nota(nota_id: int):
             nota.completado_en = datetime.utcnow()
 
             if remember_defaults:
-                session[session_key] = {
+                session["defaults_entrega"] = {
                     "entrega_nombre": entrega_nombre,
                     "entrega_legajo": entrega_legajo,
+                }
+                session[recibe_key] = {
                     "recibe_nombre": recibe_nombre,
                     "recibe_legajo": recibe_legajo,
                 }
             else:
-                session.pop(session_key, None)
+                session.pop("defaults_entrega", None)
+                session.pop(recibe_key, None)
             session.modified = True
 
             db.session.commit()
-            flash(f"✅ Nota #{nota_id} completada.", "success")
-            
+            flash(f"✅ Nota N° {nota.nro_nota} completada.", "success")
+
+            if complete_action == "complete_next":
+                siguiente = (
+                    Nota.query.filter(
+                        Nota.puesto == nota.puesto,
+                        Nota.estado == "PENDIENTE",
+                        Nota.id > nota.id,
+                    )
+                    .order_by(Nota.id)
+                    .first()
+                )
+                if siguiente:
+                    return redirect(url_for("operador_completar_nota", nota_id=siguiente.id))
+
             return redirect(url_for("operador_puesto", puesto=nota.puesto))
             
-        except Exception as e:
+        except Exception:
             db.session.rollback()
             if not field_errors:
-                flash(f"Error al completar: {str(e)}", "danger")
+                app.logger.exception("Error al completar nota")
+                flash("Error al completar nota. Intentá nuevamente.", "danger")
 
     entrega_legajo_err = field_errors.get("entrega_legajo", "")
     recibe_legajo_err = field_errors.get("recibe_legajo", "")
@@ -2120,8 +2289,9 @@ def operador_completar_nota(nota_id: int):
 
     content = f"""
 <div class="panel">
-  <h2>✏️ Completar Nota #{nota.id}</h2>
-  <p><strong>N° Nota:</strong> {nota.nro_nota} | <strong>Autoriza:</strong> {nota.autoriza} | <strong>Puesto:</strong> {nota.puesto}</p>
+  <h2>✏️ Completar Nota N° {esc(nota.nro_nota)}</h2>
+  <p class="small-text">ID interno: #{esc(nota.id)}</p>
+  <p><strong>Autoriza:</strong> {esc(nota.autoriza)} | <strong>Puesto:</strong> {esc(nota.puesto)}</p>
 </div>
 
 <div class="panel">
@@ -2129,46 +2299,47 @@ def operador_completar_nota(nota_id: int):
     {csrf_field()}
     <div class="form-group">
       <label>Entrega - Nombre y Apellido</label>
-      <input type="text" name="entrega_nombre" class="{_err(entrega_nombre_err)}" value="{pre.get('entrega_nombre', '')}" required placeholder="Nombre y Apellido" />
+      <input type="text" name="entrega_nombre" class="{_err(entrega_nombre_err)}" value="{esc(pre.get('entrega_nombre', ''))}" required placeholder="Nombre y Apellido" />
       {f'<p class="error-text">{entrega_nombre_err}</p>' if entrega_nombre_err else ''}
     </div>
     <div class="form-group">
       <label>Entrega - Legajo</label>
-      <input type="text" name="entrega_legajo" class="{_err(entrega_legajo_err)}" value="{pre.get('entrega_legajo', '')}" required placeholder="Ej: 501123" />
+      <input type="text" name="entrega_legajo" class="{_err(entrega_legajo_err)}" value="{esc(pre.get('entrega_legajo', ''))}" required placeholder="Ej: 501123" />
       {f'<p class="error-text">{entrega_legajo_err}</p>' if entrega_legajo_err else '<p class="small-text">Usá solo números (501000 - 512000).</p>'}
     </div>
     <div class="form-group">
       <label>Recibe - Nombre y Apellido</label>
-      <input type="text" name="recibe_nombre" class="{_err(recibe_nombre_err)}" value="{pre.get('recibe_nombre', '')}" required placeholder="Nombre y Apellido" />
+      <input type="text" name="recibe_nombre" class="{_err(recibe_nombre_err)}" value="{esc(pre.get('recibe_nombre', ''))}" required placeholder="Nombre y Apellido" />
       {f'<p class="error-text">{recibe_nombre_err}</p>' if recibe_nombre_err else ''}
     </div>
     <div class="form-group">
       <label>Recibe - Legajo</label>
-      <input type="text" name="recibe_legajo" class="{_err(recibe_legajo_err)}" value="{pre.get('recibe_legajo', '')}" required placeholder="Ej: 502456" />
+      <input type="text" name="recibe_legajo" class="{_err(recibe_legajo_err)}" value="{esc(pre.get('recibe_legajo', ''))}" required placeholder="Ej: 502456" />
       {f'<p class="error-text">{recibe_legajo_err}</p>' if recibe_legajo_err else '<p class="small-text">Usá solo números (501000 - 512000).</p>'}
     </div>
     <div class="form-group">
       <label>Fecha y Hora de Recepción</label>
-      <input type="datetime-local" name="fecha_hora_recepcion" class="{_err(fecha_err)}" value="{pre.get('fecha_hora_recepcion', '')}" required />
+      <input type="datetime-local" name="fecha_hora_recepcion" class="{_err(fecha_err)}" value="{esc(pre.get('fecha_hora_recepcion', ''))}" required />
       {f'<p class="error-text">{fecha_err}</p>' if fecha_err else ''}
     </div>
     <div class="form-group">
       <label>Observaciones (opcional)</label>
-      <textarea name="observaciones" rows="3">{pre.get('observaciones', '')}</textarea>
+      <textarea name="observaciones" rows="3">{esc(pre.get('observaciones', ''))}</textarea>
     </div>
     <label class="remember-toggle">
       <input type="checkbox" name="remember_defaults" {remember_prefill} />
-      Guardar datos de entrega y recepción para esta sesión
+      Guardar entrega (global) y recepción (por puesto) para esta sesión
     </label>
     <div class="action-row">
-      <button type="submit" class="btn btn-success">✅ Completar Nota</button>
+      <button type="submit" name="complete_action" value="complete" class="btn btn-success">✅ Completar Nota</button>
+      <button type="submit" name="complete_action" value="complete_next" class="btn btn-primary">✅ Completar y siguiente</button>
       <a href="{url_for('operador_puesto', puesto=nota.puesto)}" class="btn btn-secondary">← Cancelar</a>
     </div>
   </form>
 </div>
 """
     
-    return render_page(f"Completar Nota #{nota_id}", content, show_op_nav=True)
+    return render_page(f"Completar Nota N° {nota.nro_nota}", content, show_op_nav=True)
 
 
 @app.route("/operador/reportar_inicio")
@@ -2182,8 +2353,8 @@ def operador_reportar_inicio():
     nros_nota = sorted(set([n.nro_nota for n in notas_recientes]))
     puestos = sorted(set([n.puesto for n in notas_recientes]) | set(PUESTOS_PREDEFINIDOS))
     
-    nro_options = "".join([f'<option value="{nro}">{nro}</option>' for nro in nros_nota])
-    puesto_options = "".join([f'<option value="{p}">{p}</option>' for p in puestos])
+    nro_options = "".join([f'<option value="{esc(nro)}">{esc(nro)}</option>' for nro in nros_nota])
+    puesto_options = "".join([f'<option value="{esc(p)}">{esc(p)}</option>' for p in puestos])
     
     wsp_link = None
     if WHATSAPP_NUMBER:
@@ -2286,9 +2457,10 @@ def operador_reportar():
         flash("✅ Reporte enviado. El admin lo revisará.", "success")
         return redirect(url_for("operador_home"))
             
-    except Exception as e:
+    except Exception:
         db.session.rollback()
-        flash(f"Error al enviar reporte: {str(e)}", "danger")
+        app.logger.exception("Error al enviar reporte")
+        flash("Error al enviar reporte. Intentá nuevamente.", "danger")
         return redirect(url_for("operador_reportar_inicio"))
 
 
@@ -2343,12 +2515,21 @@ def export_tables_to_csv(out_dir: str | None = None) -> list[str]:
             ])
             for n in notas:
                 writer.writerow([
-                    n.id, n.nro_nota, n.autoriza, n.puesto, n.estado,
-                    n.entrega_nombre or "", n.entrega_legajo or "",
-                    n.recibe_nombre or "", n.recibe_legajo or "",
-                    _fmt(n.fecha_hora_recepcion), n.observaciones or "",
-                    n.creado_por or "", _fmt(n.creado_en),
-                    n.completado_por or "", _fmt(n.completado_en),
+                    n.id,
+                    sanitize_csv(n.nro_nota),
+                    sanitize_csv(n.autoriza),
+                    sanitize_csv(n.puesto),
+                    sanitize_csv(n.estado),
+                    sanitize_csv(n.entrega_nombre or ""),
+                    sanitize_csv(n.entrega_legajo or ""),
+                    sanitize_csv(n.recibe_nombre or ""),
+                    sanitize_csv(n.recibe_legajo or ""),
+                    sanitize_csv(_fmt(n.fecha_hora_recepcion)),
+                    sanitize_csv(n.observaciones or ""),
+                    sanitize_csv(n.creado_por or ""),
+                    sanitize_csv(_fmt(n.creado_en)),
+                    sanitize_csv(n.completado_por or ""),
+                    sanitize_csv(_fmt(n.completado_en)),
                 ])
 
         errores = ErrorReporte.query.order_by(ErrorReporte.id).all()
@@ -2360,9 +2541,14 @@ def export_tables_to_csv(out_dir: str | None = None) -> list[str]:
             ])
             for err in errores:
                 writer.writerow([
-                    err.id, err.nota_id or "", err.nro_nota or "",
-                    err.puesto or "", err.reportado_por or "",
-                    err.detalle or "", _fmt(err.creado_en), err.estado or "",
+                    err.id,
+                    sanitize_csv(err.nota_id or ""),
+                    sanitize_csv(err.nro_nota or ""),
+                    sanitize_csv(err.puesto or ""),
+                    sanitize_csv(err.reportado_por or ""),
+                    sanitize_csv(err.detalle or ""),
+                    sanitize_csv(_fmt(err.creado_en)),
+                    sanitize_csv(err.estado or ""),
                 ])
 
     return [nota_path, err_path]
