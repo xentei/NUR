@@ -5,6 +5,7 @@ import re
 import shutil
 import sqlite3
 import secrets
+import threading
 import time
 from datetime import datetime, timedelta
 from functools import wraps
@@ -645,6 +646,8 @@ def init_db_with_retry(max_attempts: int = 12, delay_seconds: float = 2.0) -> No
                 print(f"⏳ DB no disponible (intento {attempt}/{max_attempts}). Reintentando en {delay_seconds}s...")
                 time.sleep(delay_seconds)
 
+_db_init_done = False
+_db_init_lock = threading.Lock()
 
 # =========================
 # TEMPLATES
@@ -692,9 +695,20 @@ def render_page(
     )
 
 
-@app.before_serving
-def _init_db_on_startup() -> None:
-    init_db_with_retry()
+@app.before_request
+def _ensure_db_init() -> None:
+    global _db_init_done
+    if _db_init_done:
+        return
+    with _db_init_lock:
+        if _db_init_done:
+            return
+        try:
+            init_db_with_retry()
+        except OperationalError as exc:
+            print(f"⚠️ Inicialización de DB pendiente, se reintentará en la próxima request: {exc}")
+            return
+        _db_init_done = True
 
 # Continuaré con las rutas en el siguiente mensaje...
 
@@ -1024,15 +1038,28 @@ def admin_home():
       </tr>
 """
     
-    content += """
+    prev_link = (
+        f'<a href="{url_for("admin_home", nro_nota=flt_nro, autoriza=flt_aut, puesto=flt_puesto, page=page-1)}" '
+        'class="btn btn-secondary">← Anterior</a>'
+        if page > 1
+        else ""
+    )
+    next_link = (
+        f'<a href="{url_for("admin_home", nro_nota=flt_nro, autoriza=flt_aut, puesto=flt_puesto, page=page+1)}" '
+        'class="btn btn-secondary">Siguiente →</a>'
+        if has_next
+        else ""
+    )
+
+    content += f"""
     </tbody>
   </table>
   </div>
   <div class="action-row" style="margin-top:15px;">
     <span class="small-text">Mostrando página {esc(page)} de {esc(total_pages)} ({esc(total_notas)} registros).</span>
     <div class="action-row">
-      {f'<a href="{url_for("admin_home", nro_nota=flt_nro, autoriza=flt_aut, puesto=flt_puesto, page=page-1)}" class="btn btn-secondary">← Anterior</a>' if page > 1 else ''}
-      {f'<a href="{url_for("admin_home", nro_nota=flt_nro, autoriza=flt_aut, puesto=flt_puesto, page=page+1)}" class="btn btn-secondary">Siguiente →</a>' if has_next else ''}
+      {prev_link}
+      {next_link}
     </div>
   </div>
 </div>
@@ -1779,15 +1806,28 @@ def dop_home():
       </tr>
 """
     
-    content += """
+    prev_link = (
+        f'<a href="{url_for("dop_home", nro_nota=flt_nro, autoriza=flt_aut, puesto=flt_puesto, page=page-1)}" '
+        'class="btn btn-secondary">← Anterior</a>'
+        if page > 1
+        else ""
+    )
+    next_link = (
+        f'<a href="{url_for("dop_home", nro_nota=flt_nro, autoriza=flt_aut, puesto=flt_puesto, page=page+1)}" '
+        'class="btn btn-secondary">Siguiente →</a>'
+        if has_next
+        else ""
+    )
+
+    content += f"""
     </tbody>
   </table>
   </div>
   <div class="action-row" style="margin-top:15px;">
     <span class="small-text">Mostrando página {esc(page)} de {esc(total_pages)} ({esc(total_notas)} registros). (Solo lectura - no podés borrar)</span>
     <div class="action-row">
-      {f'<a href="{url_for("dop_home", nro_nota=flt_nro, autoriza=flt_aut, puesto=flt_puesto, page=page-1)}" class="btn btn-secondary">← Anterior</a>' if page > 1 else ''}
-      {f'<a href="{url_for("dop_home", nro_nota=flt_nro, autoriza=flt_aut, puesto=flt_puesto, page=page+1)}" class="btn btn-secondary">Siguiente →</a>' if has_next else ''}
+      {prev_link}
+      {next_link}
     </div>
   </div>
 </div>
