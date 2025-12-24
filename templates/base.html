@@ -112,6 +112,7 @@
     border: 2px solid #e5e7eb;
     border-radius: 10px;
     font-size: 14px;
+    min-width: 0;
     transition: border-color 0.2s, box-shadow 0.2s;
     background: white;
   }
@@ -132,8 +133,13 @@
     position: relative;
     display: flex;
     align-items: center;
+    width: 100%;
   }
-  .password-wrapper input { padding-right: 42px; }
+  .password-wrapper input {
+    padding-right: 42px;
+    flex: 1;
+    min-width: 0;
+  }
   .toggle-pass {
     position: absolute;
     right: 10px;
@@ -185,6 +191,8 @@
     padding: 15px;
     text-align: left;
     border-bottom: 1px solid #e5e7eb;
+    word-break: break-word;
+    overflow-wrap: anywhere;
   }
   tbody tr:hover {
     background: #f9fafb;
