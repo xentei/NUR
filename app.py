@@ -717,6 +717,7 @@ def index():
 
 
 @app.route("/login", methods=["GET", "POST"])
+@limiter.limit("10 per 5 minutes")
 def login():
     if current_user.is_authenticated:
         if current_user.must_change_password:
@@ -765,7 +766,7 @@ def login():
     return render_template('login.html')
 
 
-@app.route("/logout", methods=["GET", "POST"])
+@app.route("/logout", methods=["POST"])
 @login_required
 def logout():
     if request.method == "GET":
