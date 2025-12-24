@@ -1038,15 +1038,28 @@ def admin_home():
       </tr>
 """
     
-    content += """
+    prev_link = (
+        f'<a href="{url_for("admin_home", nro_nota=flt_nro, autoriza=flt_aut, puesto=flt_puesto, page=page-1)}" '
+        'class="btn btn-secondary">← Anterior</a>'
+        if page > 1
+        else ""
+    )
+    next_link = (
+        f'<a href="{url_for("admin_home", nro_nota=flt_nro, autoriza=flt_aut, puesto=flt_puesto, page=page+1)}" '
+        'class="btn btn-secondary">Siguiente →</a>'
+        if has_next
+        else ""
+    )
+
+    content += f"""
     </tbody>
   </table>
   </div>
   <div class="action-row" style="margin-top:15px;">
     <span class="small-text">Mostrando página {esc(page)} de {esc(total_pages)} ({esc(total_notas)} registros).</span>
     <div class="action-row">
-      {f'<a href="{url_for("admin_home", nro_nota=flt_nro, autoriza=flt_aut, puesto=flt_puesto, page=page-1)}" class="btn btn-secondary">← Anterior</a>' if page > 1 else ''}
-      {f'<a href="{url_for("admin_home", nro_nota=flt_nro, autoriza=flt_aut, puesto=flt_puesto, page=page+1)}" class="btn btn-secondary">Siguiente →</a>' if has_next else ''}
+      {prev_link}
+      {next_link}
     </div>
   </div>
 </div>
@@ -1793,15 +1806,28 @@ def dop_home():
       </tr>
 """
     
-    content += """
+    prev_link = (
+        f'<a href="{url_for("dop_home", nro_nota=flt_nro, autoriza=flt_aut, puesto=flt_puesto, page=page-1)}" '
+        'class="btn btn-secondary">← Anterior</a>'
+        if page > 1
+        else ""
+    )
+    next_link = (
+        f'<a href="{url_for("dop_home", nro_nota=flt_nro, autoriza=flt_aut, puesto=flt_puesto, page=page+1)}" '
+        'class="btn btn-secondary">Siguiente →</a>'
+        if has_next
+        else ""
+    )
+
+    content += f"""
     </tbody>
   </table>
   </div>
   <div class="action-row" style="margin-top:15px;">
     <span class="small-text">Mostrando página {esc(page)} de {esc(total_pages)} ({esc(total_notas)} registros). (Solo lectura - no podés borrar)</span>
     <div class="action-row">
-      {f'<a href="{url_for("dop_home", nro_nota=flt_nro, autoriza=flt_aut, puesto=flt_puesto, page=page-1)}" class="btn btn-secondary">← Anterior</a>' if page > 1 else ''}
-      {f'<a href="{url_for("dop_home", nro_nota=flt_nro, autoriza=flt_aut, puesto=flt_puesto, page=page+1)}" class="btn btn-secondary">Siguiente →</a>' if has_next else ''}
+      {prev_link}
+      {next_link}
     </div>
   </div>
 </div>
