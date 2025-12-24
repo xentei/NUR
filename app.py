@@ -5,6 +5,7 @@ import re
 import shutil
 import sqlite3
 import secrets
+import threading
 import time
 from datetime import datetime, timedelta
 from functools import wraps
@@ -645,6 +646,8 @@ def init_db_with_retry(max_attempts: int = 12, delay_seconds: float = 2.0) -> No
                 print(f"⏳ DB no disponible (intento {attempt}/{max_attempts}). Reintentando en {delay_seconds}s...")
                 time.sleep(delay_seconds)
 
+_db_init_done = False
+_db_init_lock = threading.Lock()
 
 # =========================
 # TEMPLATES
@@ -692,9 +695,20 @@ def render_page(
     )
 
 
-@app.before_serving
-def _init_db_on_startup() -> None:
-    init_db_with_retry()
+@app.before_request
+def _ensure_db_init() -> None:
+    global _db_init_done
+    if _db_init_done:
+        return
+    with _db_init_lock:
+        if _db_init_done:
+            return
+        try:
+            init_db_with_retry()
+        except OperationalError as exc:
+            print(f"⚠️ Inicialización de DB pendiente, se reintentará en la próxima request: {exc}")
+            return
+        _db_init_done = True
 
 # Continuaré con las rutas en el siguiente mensaje...
 
