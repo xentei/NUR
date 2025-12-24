@@ -23,8 +23,6 @@ from sqlalchemy import event, inspect, text
 from sqlalchemy.engine import Engine
 from flask_wtf.csrf import CSRFProtect, generate_csrf
 from markupsafe import Markup, escape
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import generate_password_hash, check_password_hash
 import sqlite3
@@ -138,6 +136,8 @@ ADMIN_ROLE = "admin"
 DOP_ROLE = "dop"
 OP_ROLE = "operador"
 VIEW_ROLE = "visor"
+LOGIN_MAX_ATTEMPTS = _int_env("LOGIN_MAX_ATTEMPTS", 100)
+LOGIN_WINDOW_MINUTES = _int_env("LOGIN_WINDOW_MINUTES", 5)
 
 SECRET_KEY = _load_secret_key()
 
@@ -293,6 +293,25 @@ def sanitize_csv(value: object) -> str:
     if text and text[0] in ("=", "+", "-", "@"):
         return f"'{text}"
     return text
+
+
+login_attempts = defaultdict(list)
+
+
+def is_rate_limited(ip: str) -> bool:
+    now = datetime.utcnow()
+    cutoff = now - timedelta(minutes=LOGIN_WINDOW_MINUTES)
+    attempts = [t for t in login_attempts[ip] if t > cutoff]
+    login_attempts[ip] = attempts
+    return len(attempts) >= LOGIN_MAX_ATTEMPTS
+
+
+def record_failed_login(ip: str) -> None:
+    login_attempts[ip].append(datetime.utcnow())
+
+
+def reset_login_attempts(ip: str) -> None:
+    login_attempts.pop(ip, None)
 
 
 def csrf_field() -> Markup:
@@ -691,6 +710,10 @@ def login():
             return redirect(url_for("visor_home"))
     
     if request.method == "POST":
+        ip = request.remote_addr or "unknown"
+        if is_rate_limited(ip):
+            flash("Demasiados intentos. Esperá unos minutos.", "danger")
+            return redirect(url_for("login"))
         username = sanitize_text(request.form.get("username", ""))
         password = request.form.get("password", "")
         
@@ -699,6 +722,7 @@ def login():
             session.clear()
             session.permanent = True
             login_user(user)
+            reset_login_attempts(ip)
             flash("Bienvenido!", "success")
 
             if user.must_change_password:
@@ -714,6 +738,7 @@ def login():
             else:
                 return redirect(url_for("visor_home"))
         else:
+            record_failed_login(ip)
             flash("Usuario o contraseña incorrectos.", "danger")
     
     return render_template('login.html')
@@ -722,6 +747,28 @@ def login():
 @app.route("/logout", methods=["POST"])
 @login_required
 def logout():
+    if request.method == "GET":
+        content = f"""
+<div class="panel">
+  <h2>¿Querés cerrar sesión?</h2>
+  <p class="small-text">Vas a volver a la pantalla de login.</p>
+  <form method="POST" action="{url_for('logout')}">
+    {csrf_field()}
+    <div class="action-row">
+      <button type="submit" class="btn btn-secondary">Cerrar sesión</button>
+      <a href="{url_for('index')}" class="btn btn-primary">Cancelar</a>
+    </div>
+  </form>
+</div>
+"""
+        return render_page(
+            "Confirmar cierre de sesión",
+            content,
+            show_admin_nav=current_user.role == ADMIN_ROLE,
+            show_dop_nav=current_user.role == DOP_ROLE,
+            show_op_nav=current_user.role == OP_ROLE,
+            show_view_nav=current_user.role == VIEW_ROLE,
+        )
     session.clear()
     logout_user()
     flash("Sesión cerrada correctamente.", "success")
@@ -1036,9 +1083,10 @@ def admin_borrar_nota(nota_id: int):
     try:
         nota = db.session.get(Nota, nota_id)
         if nota:
+            nro_nota = nota.nro_nota
             db.session.delete(nota)
             db.session.commit()
-            flash(f"Nota #{nota_id} borrada.", "success")
+            flash(f"Nota N° {nro_nota} borrada. (ID interno #{nota_id})", "success")
         else:
             flash("Nota no encontrada.", "warning")
     except Exception:
@@ -2186,7 +2234,7 @@ def operador_completar_nota(nota_id: int):
             session.modified = True
 
             db.session.commit()
-            flash(f"✅ Nota #{nota_id} completada.", "success")
+            flash(f"✅ Nota N° {nota.nro_nota} completada.", "success")
 
             if complete_action == "complete_next":
                 siguiente = (
@@ -2220,8 +2268,9 @@ def operador_completar_nota(nota_id: int):
 
     content = f"""
 <div class="panel">
-  <h2>✏️ Completar Nota #{esc(nota.id)}</h2>
-  <p><strong>N° Nota:</strong> {esc(nota.nro_nota)} | <strong>Autoriza:</strong> {esc(nota.autoriza)} | <strong>Puesto:</strong> {esc(nota.puesto)}</p>
+  <h2>✏️ Completar Nota N° {esc(nota.nro_nota)}</h2>
+  <p class="small-text">ID interno: #{esc(nota.id)}</p>
+  <p><strong>Autoriza:</strong> {esc(nota.autoriza)} | <strong>Puesto:</strong> {esc(nota.puesto)}</p>
 </div>
 
 <div class="panel">
@@ -2269,7 +2318,7 @@ def operador_completar_nota(nota_id: int):
 </div>
 """
     
-    return render_page(f"Completar Nota #{nota_id}", content, show_op_nav=True)
+    return render_page(f"Completar Nota N° {nota.nro_nota}", content, show_op_nav=True)
 
 
 @app.route("/operador/reportar_inicio")
