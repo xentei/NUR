@@ -5,13 +5,12 @@ import re
 import shutil
 import sqlite3
 import secrets
+import time
 from datetime import datetime, timedelta
 from functools import wraps
 from io import StringIO
-from collections import defaultdict
-import time
-from sqlalchemy.exc import OperationalError
 import csv
+from collections import defaultdict  # used for in-memory login rate tracking
 
 from flask import (
     Flask, request, redirect, url_for, render_template,
@@ -24,15 +23,13 @@ from flask_login import (
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import event, inspect, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 from flask_wtf.csrf import CSRFProtect, generate_csrf
 from markupsafe import Markup, escape
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import generate_password_hash, check_password_hash
-import sqlite3
-from sqlalchemy import event
-from sqlalchemy.engine import Engine
 
 @event.listens_for(Engine, "connect")
 def _set_sqlite_pragma(dbapi_connection, connection_record):
@@ -240,6 +237,8 @@ app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 engine_options = {"pool_pre_ping": True}
 if USING_SQLITE:
     engine_options["connect_args"] = {"check_same_thread": False, "timeout": 15}
+else:
+    engine_options["connect_args"] = {"connect_timeout": 10}
 app.config["SQLALCHEMY_ENGINE_OPTIONS"] = engine_options
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=8)
 
@@ -610,28 +609,41 @@ def bootstrap_users() -> None:
     db.session.commit()
 
 
-with app.app_context():
-    db.create_all()
-    try:
-        inspector = inspect(db.engine)
-        columns = {col["name"] for col in inspector.get_columns("user")}
-        if "must_change_password" not in columns:
-            dialect = db.engine.url.get_backend_name()
-            with db.engine.begin() as conn:
-                if dialect == "sqlite":
-                    conn.execute(text("ALTER TABLE user ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0"))
-                elif dialect in {"postgresql", "postgres"}:
-                    conn.execute(text("ALTER TABLE \"user\" ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE"))
-                else:
-                    print(f"⚠️ Dialecto {dialect} no soportado para migración automática de must_change_password.")
-            # Refrescar metadata
-            db.session.commit()
-            print("🔄 Columna must_change_password agregada a tabla user.")
-    except Exception as exc:
-        print(f"⚠️ No se pudo verificar/agregar must_change_password: {exc}")
-    bootstrap_users()
-    print(f"✅ Base de datos inicializada correctamente")
-    print(f"📊 Usuarios: {User.query.count()} | Notas: {Nota.query.count()} | Errores: {ErrorReporte.query.count()}")
+def init_db_with_retry(max_attempts: int = 12, delay_seconds: float = 2.0) -> None:
+    """Inicializa la DB con reintentos para evitar fallas por cold start."""
+    with app.app_context():
+        for attempt in range(1, max_attempts + 1):
+            try:
+                with db.engine.connect() as conn:
+                    conn.execute(text("SELECT 1"))
+                db.create_all()
+                try:
+                    inspector = inspect(db.engine)
+                    columns = {col["name"] for col in inspector.get_columns("user")}
+                    if "must_change_password" not in columns:
+                        dialect = db.engine.url.get_backend_name()
+                        with db.engine.begin() as conn:
+                            if dialect == "sqlite":
+                                conn.execute(text("ALTER TABLE user ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0"))
+                            elif dialect in {"postgresql", "postgres"}:
+                                conn.execute(text("ALTER TABLE \"user\" ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE"))
+                            else:
+                                print(f"⚠️ Dialecto {dialect} no soportado para migración automática de must_change_password.")
+                        db.session.commit()
+                        print("🔄 Columna must_change_password agregada a tabla user.")
+                except Exception as exc:
+                    print(f"⚠️ No se pudo verificar/agregar must_change_password: {exc}")
+
+                bootstrap_users()
+                print("✅ Base de datos inicializada correctamente")
+                print(f"📊 Usuarios: {User.query.count()} | Notas: {Nota.query.count()} | Errores: {ErrorReporte.query.count()}")
+                return
+            except OperationalError as exc:
+                if attempt == max_attempts:
+                    print(f"❌ DB no disponible tras {max_attempts} intentos: {exc}")
+                    raise
+                print(f"⏳ DB no disponible (intento {attempt}/{max_attempts}). Reintentando en {delay_seconds}s...")
+                time.sleep(delay_seconds)
 
 
 # =========================
@@ -678,6 +690,11 @@ def render_page(
         nav_buttons=Markup(nav_buttons),
         content_html=Markup(content_html),
     )
+
+
+@app.before_serving
+def _init_db_on_startup() -> None:
+    init_db_with_retry()
 
 # Continuaré con las rutas en el siguiente mensaje...
 
